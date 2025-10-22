@@ -66,11 +66,11 @@ All pre-training configurations are available in [configs/pretrain](configs/pret
 
 ```shell
 # create a .npy dataset (only once)
-python -m scripts.dump_data --data-dir "/path/to/mimic-iv-ecg" --verbose
+python -m scripts.dump_data --data-dir "../../ecg/data/mimic-ecg" --verbose
 # pre-train ViT encoder
 python -m pretrain \
-  --data "mimic-iv-ecg=/path/to/mimic-iv-ecg.npy" \
-  --out "pretrain-output-dir" \
+  --data "mimic-iv-ecg=../../ecg/data/mimic-ecg.npy" \
+  --out "checkpoints/" \
   --config "ViTS_mimic" \
   --amp "bfloat16"
 ```
