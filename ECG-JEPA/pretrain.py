@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from os import path, makedirs
 from time import time
 
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -238,6 +239,8 @@ def main():
   step_time = AverageMeter()
   train_loss = AverageMeter()
 
+  best_loss = None
+
   for step in range(config.steps):
     step_start = time()
     # update hyperparameters according to schedule
@@ -247,6 +250,9 @@ def main():
     batch_loss = 0.
     for _ in range(config.gradient_accumulation_steps):
       x, mask_encoder, mask_predictor = next(train_iterator)
+      kr = mask_encoder.float().mean().item()   # adjust if mask semantics differ
+      if (step + 1) % 100 == 0:
+          logging.getLogger('app').info(f"[mask] keep_ratio≈{kr:.3f}")
       with auto_mixed_precision:
         loss = model(x, mask_encoder, mask_predictor)
         loss = loss / config.gradient_accumulation_steps
@@ -261,12 +267,26 @@ def main():
     # finalize train step
     step_end = time()
     step_time.update(step_end - step_start)
+    # after optimizer is created and schedules are built
+    if (step + 1) % 100 == 0:
+      lr = optimizer.param_groups[0]['lr']
+      wd = optimizer.param_groups[0]['weight_decay']
+      # if your momentum schedule exposes a .value or you kept a local 'm' value, log it too
+      logging.getLogger('app').info(
+          f"[sched] step={step+1} lr={lr:.3e} wd={wd:.3g}"
+      )
+
     if (step + 1) % 100 == 0:
       logger.info(f'[{step + 1:06d}] '
                   f'step_time {step_time.value:.4f} '
                   f'train_loss {train_loss.value:.4f}')
       step_time = AverageMeter()
       train_loss = AverageMeter()
+
+    if (step + 1) % 200 == 0:
+      xm, xs = x.mean().item(), x.std().item()
+      logging.getLogger('app').debug(f"[data] x mean={xm:.3f} std={xs:.3f}")
+
     if (step + 1) % config.checkpoint_interval == 0:
       torch.save({
         'model': original_model.state_dict(),
@@ -274,6 +294,20 @@ def main():
         'config': dataclasses.asdict(config),
         'step': step + 1,
       }, path.join(args.out, f'chkpt_{step + 1}.pt'))
+      logger.info(f'saved chkpt_{step + 1}.pt')
+    # save best checkpoint
+    loss_val = batch_loss
+    if best_loss is None or loss_val < best_loss:
+      best_loss = loss_val
+      torch.save({
+          "model": original_model.state_dict(),
+          "optimizer": optimizer.state_dict(),
+          "config": dataclasses.asdict(config),
+          "step": step + 1,
+          "loss": best_loss,
+      }, path.join(args.out, "best_ckpt.pt"))
+      logger.info(f"[BEST] step {step+1} | loss={loss_val:.4f} | saved best_ckpt.pt")
+
 
 
 def load_variable_data_dump(dump_file, min_channel_size, transform=None, processes=None):

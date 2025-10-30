@@ -301,18 +301,19 @@ def main():
                   f'val_auc {val_auc:.4f}')
       step_time = AverageMeter()
       train_loss = AverageMeter()
+
+      torch.save({
+        'model': best_chkpt,
+        'config': dataclasses.asdict(encoder_config),
+        'eval_config': dataclasses.asdict(eval_config),
+        'preprocess': {'mean': torch.from_numpy(mean.squeeze()),
+                      'std': torch.from_numpy(std.squeeze())},
+        'task': ptb_xl_task
+      }, path.join(args.out, f'{args.task}_best_chkpt.pt'))
+
       if step - best_step >= eval_config.early_stopping_patience:
         logging.info('stopping training early because validation AUC does not improve')
         break
-
-  torch.save({
-    'model': best_chkpt,
-    'config': dataclasses.asdict(encoder_config),
-    'eval_config': dataclasses.asdict(eval_config),
-    'preprocess': {'mean': torch.from_numpy(mean.squeeze()),
-                   'std': torch.from_numpy(std.squeeze())},
-    'task': ptb_xl_task
-  }, path.join(args.out, f'{args.task}_best_chkpt.pt'))
 
   # test model
   logger.info('loading best model checkpoint')

@@ -3,6 +3,8 @@ from collections import OrderedDict
 import torch
 from torch import nn
 
+import math
+
 import configs
 from models import VisionTransformer
 from models.modules import AttentivePooler
@@ -30,9 +32,14 @@ class ViTClassifier(nn.Module):
 
     for name, module in self.named_modules(memo=set(encoder.modules())):
       if isinstance(module, nn.Linear):
-        nn.init.xavier_uniform_(module.weight)
-        if module.bias is not None:
+        # nn.init.xavier_uniform_(module.weight)
+        if name.endswith('mlp.fc2') or name.endswith('attn.proj'):
+          # residual projections are initialized with scaled std
+          nn.init.trunc_normal_(module.weight, mean=0., std=0.02 / math.sqrt(2 * config.depth))
+        elif module.bias is not None:
           nn.init.zeros_(module.bias)
+        else:
+          nn.init.trunc_normal_(module.weight, mean=0., std=0.02)        
       elif isinstance(module, nn.LayerNorm):
         nn.init.ones_(module.weight)
         if module.bias is not None:
