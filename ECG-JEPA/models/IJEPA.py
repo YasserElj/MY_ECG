@@ -31,10 +31,10 @@ def apply_masks_list(x, masks):
     
     Args:
         x: [B, N, D] tensor
-        masks: list of M tensors, each [B, K_i] containing indices
+        masks: list of M tensors, each [B, K] containing indices (all same K)
         
     Returns:
-        [B*M, max_K, D] tensor (padded to max_K if needed)
+        [B*M, K, D] tensor
     """
     all_x = []
     for m in masks:

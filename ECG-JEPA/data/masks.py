@@ -78,6 +78,8 @@ class IJEPAMaskCollator:
     I-JEPA strategy: one contiguous context block, multiple target blocks.
     Context is 85-95% contiguous, targets are 15-20% each.
     Targets may fall outside context (harder prediction).
+    
+    All target blocks use the SAME length within a batch to allow tensor operations.
     """
     
     def __init__(self, patch_size, context_scale=(0.85, 0.95), pred_scale=(0.15, 0.20),
@@ -93,29 +95,30 @@ class IJEPAMaskCollator:
         batch_size, _, channel_size = batch.size()
         num_patches = channel_size // self.patch_size
 
-        # Sample context and target lengths ONCE for the batch (uniform shapes)
+        # Sample context length
         ctx_scale = np.random.uniform(*self.context_scale)
         ctx_len = max(self.min_keep, int(num_patches * ctx_scale))
         
-        target_lens = []
-        for _ in range(self.num_pred_blocks):
-            t_scale = np.random.uniform(*self.pred_scale)
-            target_lens.append(max(1, int(num_patches * t_scale)))
+        # Sample ONE target length for ALL blocks (ensures uniform tensor shape)
+        t_scale = np.random.uniform(*self.pred_scale)
+        target_len = max(1, int(num_patches * t_scale))
 
         all_context = []
         all_target_blocks = [[] for _ in range(self.num_pred_blocks)]
 
         for _ in range(batch_size):
             # Sample context start position
-            ctx_start = np.random.randint(0, num_patches - ctx_len + 1)
-            context_indices = list(range(ctx_start, ctx_start + ctx_len))
+            max_ctx_start = max(0, num_patches - ctx_len)
+            ctx_start = np.random.randint(0, max_ctx_start + 1)
+            context_indices = list(range(ctx_start, min(ctx_start + ctx_len, num_patches)))
             
-            # Sample target blocks
+            # Sample target blocks (all same length)
             target_blocks = []
             all_target_set = set()
-            for t_len in target_lens:
-                start = np.random.randint(0, num_patches - t_len + 1)
-                block = list(range(start, start + t_len))
+            for _ in range(self.num_pred_blocks):
+                max_start = max(0, num_patches - target_len)
+                start = np.random.randint(0, max_start + 1)
+                block = list(range(start, min(start + target_len, num_patches)))
                 target_blocks.append(block)
                 all_target_set.update(block)
             
@@ -126,27 +129,32 @@ class IJEPAMaskCollator:
             # Ensure minimum context
             if len(context_final) < self.min_keep:
                 available = sorted(set(range(num_patches)) - all_target_set)
-                context_final = available[:self.min_keep] if len(available) >= self.min_keep else list(range(self.min_keep))
+                if len(available) >= self.min_keep:
+                    context_final = available[:self.min_keep]
+                else:
+                    context_final = list(range(self.min_keep))
             
             all_context.append(context_final)
             for i, block in enumerate(target_blocks):
                 all_target_blocks[i].append(block)
 
-        # Build context tensor - use max length and pad
+        # Build context tensor - pad to max length
         max_ctx_len = max(len(c) for c in all_context)
         context_tensor = torch.zeros(batch_size, max_ctx_len, dtype=torch.long)
         for i, ctx in enumerate(all_context):
             pad_len = max_ctx_len - len(ctx)
             padded = ctx + [ctx[-1]] * pad_len if ctx else [0] * max_ctx_len
-            context_tensor[i] = torch.tensor(padded, dtype=torch.long)
+            context_tensor[i] = torch.tensor(padded[:max_ctx_len], dtype=torch.long)
         
-        # Build target tensors
+        # Build target tensors - all blocks have same length
         target_tensors = []
         for block_idx in range(self.num_pred_blocks):
-            t_len = target_lens[block_idx]
-            block_tensor = torch.zeros(batch_size, t_len, dtype=torch.long)
+            block_tensor = torch.zeros(batch_size, target_len, dtype=torch.long)
             for i, block in enumerate(all_target_blocks[block_idx]):
-                block_tensor[i] = torch.tensor(block[:t_len], dtype=torch.long)
+                # Pad if needed (shouldn't happen but safety)
+                if len(block) < target_len:
+                    block = block + [block[-1]] * (target_len - len(block))
+                block_tensor[i] = torch.tensor(block[:target_len], dtype=torch.long)
             target_tensors.append(block_tensor)
 
         return batch, [context_tensor], target_tensors
