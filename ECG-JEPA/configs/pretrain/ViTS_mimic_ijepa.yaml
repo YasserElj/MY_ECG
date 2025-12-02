@@ -1,4 +1,4 @@
-# ViT-Small config for ECG-JEPA pretraining on MIMIC-IV-ECG
+# ViT-Small config for I-JEPA pretraining on MIMIC-IV-ECG
 # learnable encoder parameters: 14,277,888
 
 # data
@@ -7,11 +7,12 @@ channels: [I, II, III, AVR, AVL, AVF, V1, V2, V3, V4, V5, V6]
 channel_size: 5000
 patch_size: 25
 
-# --- Original ECG-JEPA Masking Strategy ---
-masking_strategy: 'ecg-jepa'
-min_block_size: 10
-min_keep_ratio: 0.15
-max_keep_ratio: 0.25
+# --- I-JEPA Masking Strategy ---
+masking_strategy: 'i-jepa'
+context_scale: [0.85, 0.95]  # Context is ONE contiguous block covering 85-95%
+pred_scale: [0.15, 0.20]     # Each target block covers 15-20% of the signal
+n_pred_blocks: 4             # Number of target blocks to predict
+min_keep: 10                 # Minimum context patches to keep
 
 datasets:
   mimic-iv-ecg: 1.
@@ -47,3 +48,4 @@ opt_eps: 1.0e-6
 gradient_clip: 0
 gradient_accumulation_steps: 1
 checkpoint_interval: 10_000
+

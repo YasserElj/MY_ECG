@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=250G
 
-#SBATCH --output=outputs/finetune_two_stage_rhythm.log
-#SBATCH --error=errors/finetune_two_stage_rhythm.log
+#SBATCH --output=outputs/finetune_two_stage_superdiagnostic.log
+#SBATCH --error=errors/finetune_two_stage_superdiagnostic.log
 
 
 
@@ -51,18 +51,18 @@ export MKL_NUM_THREADS=16
 #   --config "linear" \
 #   --task "rhythm"
 
-python -m finetune \
-  --data-dir "../../ecg/data/ptb-xl" \
-  --encoder "checkpoints_finetune_rhythm/rhythm_best_chkpt.pt" \
-  --out "finetune-two-stage-rhythm" \
-  --config "finetune_after_linear" \
-  --task "rhythm"
+# python -m finetune \
+#   --data-dir "../../ecg/data/ptb-xl" \
+#   --encoder "checkpoints_finetune_rhythm/rhythm_best_chkpt.pt" \
+#   --out "finetune-two-stage-rhythm" \
+#   --config "finetune_after_linear" \
+#   --task "rhythm"
 
 # superdiagnostic
 
-# python -m finetune \
-#   --data-dir "../../ecg/data/ptb-xl" \
-#   --encoder "checkpoints2/chkpt_100000.pt" \
-#   --out "checkpoints_finetune_superdiagnostic" \
-#   --config "linear" \
-#   --task "superdiagnostic"
+python -m finetune \
+  --data-dir "../../ecg/data/ptb-xl" \
+  --encoder "checkpoints_finetune_superdiagnostic/superdiagnostic_best_chkpt.pt" \
+  --out "finetune-two-stage-superdiagnostic" \
+  --config "finetune_after_linear" \
+  --task "superdiagnostic"

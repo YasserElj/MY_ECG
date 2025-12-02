@@ -19,13 +19,14 @@ from data.datasets import (
   StPetersburg,
   PTB_XL
 )
-from data.masks import MaskCollator
+from data.masks import MaskCollator, IJEPAMaskCollator, IJEPAMaskCollatorFlat
 from data.utils import (
   TensorDataset,
   VariableTensorDataset,
   DatasetRouter
 )
 from models import JEPA
+from models.IJEPA import IJEPA
 from utils.monitoring import (
   AverageMeter,
   get_cpu_count,
@@ -169,20 +170,59 @@ def main():
 
   logger.debug(f'{get_memory_usage() / 1024 ** 3:,.2f}GB memory used after loading data')
 
+  # Determine masking strategy and model type
+  masking_strategy = getattr(config, 'masking_strategy', 'ecg-jepa')
+  use_ijepa_model = masking_strategy == 'i-jepa'
+  
+  if masking_strategy == 'i-jepa':
+    logger.info('Using I-JEPA context-to-target masking strategy with IJEPA model.')
+    collate_fn = IJEPAMaskCollator(
+      patch_size=config.patch_size,
+      context_scale=getattr(config, 'context_scale', (0.85, 0.95)),
+      pred_scale=getattr(config, 'pred_scale', (0.15, 0.20)),
+      num_pred_blocks=getattr(config, 'n_pred_blocks', 4),
+      min_keep=getattr(config, 'min_keep', 10)
+    )
+  elif masking_strategy == 'i-jepa-flat':
+    # I-JEPA masking but with original JEPA model (flattened targets)
+    logger.info('Using I-JEPA masking with original JEPA model (flattened).')
+    use_ijepa_model = False
+    collate_fn = IJEPAMaskCollatorFlat(
+      patch_size=config.patch_size,
+      context_scale=getattr(config, 'context_scale', (0.85, 0.95)),
+      pred_scale=getattr(config, 'pred_scale', (0.15, 0.20)),
+      num_pred_blocks=getattr(config, 'n_pred_blocks', 4),
+      min_keep=getattr(config, 'min_keep', 10)
+    )
+  else:
+    logger.info('Using ECG-JEPA mask-and-complement masking strategy.')
+    use_ijepa_model = False
+    collate_fn = MaskCollator(
+      patch_size=config.patch_size,
+      min_block_size=config.min_block_size,
+      min_keep_ratio=config.min_keep_ratio,
+      max_keep_ratio=config.max_keep_ratio
+    )
+
   train_loader = DataLoader(
     dataset=DatasetRouter(datasets.values()),
     batch_size=config.batch_size,
     pin_memory=using_cuda,
-    collate_fn=MaskCollator(
-      patch_size=config.patch_size,
-      min_block_size=config.min_block_size,
-      min_keep_ratio=config.min_keep_ratio,
-      max_keep_ratio=config.max_keep_ratio),
+    collate_fn=collate_fn,
     num_workers=2)
 
   def map_to_device(data_iterator, device=None):
     for batch in data_iterator:
-      yield tuple(x.to(device, non_blocking=using_cuda) for x in batch)
+      # Handle list-based masks (I-JEPA) vs tensor masks (ECG-JEPA)
+      result = []
+      for item in batch:
+        if isinstance(item, list):
+          # List of tensors (I-JEPA masks)
+          result.append([t.to(device, non_blocking=using_cuda) for t in item])
+        else:
+          # Single tensor
+          result.append(item.to(device, non_blocking=using_cuda))
+      yield tuple(result)
 
   def prefetch_batch(data_iterator):
     prefetched_batch = next(data_iterator)
@@ -222,11 +262,20 @@ def main():
     step=step)
 
   # setup model
-  model = original_model = JEPA(
-    config=config,
-    momentum_schedule=momentum_schedule,
-    use_sdp_kernel=using_cuda
-  ).to(device)
+  if use_ijepa_model:
+    logger.info('Initializing IJEPA model (multi-block predictor).')
+    model = original_model = IJEPA(
+      config=config,
+      momentum_schedule=momentum_schedule,
+      use_sdp_kernel=using_cuda
+    ).to(device)
+  else:
+    logger.info('Initializing original JEPA model.')
+    model = original_model = JEPA(
+      config=config,
+      momentum_schedule=momentum_schedule,
+      use_sdp_kernel=using_cuda
+    ).to(device)
   optimizer = model.get_optimizer(fused=using_cuda)
 
   if chkpt is not None:  # resume training from checkpoint
@@ -250,7 +299,29 @@ def main():
     batch_loss = 0.
     for _ in range(config.gradient_accumulation_steps):
       x, mask_encoder, mask_predictor = next(train_iterator)
-      kr = mask_encoder.float().mean().item()   # adjust if mask semantics differ
+      
+      # Handle different mask formats
+      if use_ijepa_model:
+        # I-JEPA model expects list-based masks
+        # mask_encoder is a list with 1 tensor, mask_predictor is a list of M tensors
+        # For keep ratio, count unique context indices / total patches
+        num_patches = x.size(-1) // config.patch_size
+        if isinstance(mask_encoder, list):
+          kr = mask_encoder[0].size(1) / num_patches
+        else:
+          kr = mask_encoder.size(1) / num_patches
+      else:
+        # Original JEPA model expects 2D tensors
+        # Flatten if needed (for IJEPAMaskCollatorFlat compatibility)
+        if isinstance(mask_encoder, list):
+          mask_encoder = mask_encoder[0]
+        if isinstance(mask_predictor, list):
+          mask_predictor = torch.cat(mask_predictor, dim=1)
+        elif mask_predictor.dim() == 3:
+          B, N, L = mask_predictor.shape
+          mask_predictor = mask_predictor.reshape(B, N * L)
+        kr = mask_encoder.float().mean().item()
+          
       if (step + 1) % 100 == 0:
           logging.getLogger('app').info(f"[mask] keep_ratio≈{kr:.3f}")
       with auto_mixed_precision:

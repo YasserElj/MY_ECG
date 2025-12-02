@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -8,9 +9,7 @@ class Config:
   channels: tuple[str, ...]
   channel_size: int
   patch_size: int
-  min_block_size: int
-  min_keep_ratio: float
-  max_keep_ratio: float
+  # -- datasets (MUST come before default args) --
   datasets: dict[str, float]
   # model architecture
   dim: int
@@ -42,6 +41,21 @@ class Config:
   gradient_clip: float
   gradient_accumulation_steps: int
   checkpoint_interval: int
+
+  # --- OPTIONAL / DEFAULT ARGUMENTS GO LAST ---
+  
+  # --- ECG-JEPA masking params ---
+  min_block_size: Optional[int] = None
+  min_keep_ratio: Optional[float] = None
+  max_keep_ratio: Optional[float] = None
+  
+  # --- I-JEPA masking params ---
+  masking_strategy: str = 'ecg-jepa' 
+  context_scale: Optional[tuple[float, float]] = None
+  n_pred_blocks: Optional[int] = None
+  pred_scale: Optional[tuple[float, float]] = None
+  min_keep: Optional[int] = None
+  allow_overlap: bool = False
 
   @property
   def num_channels(self):

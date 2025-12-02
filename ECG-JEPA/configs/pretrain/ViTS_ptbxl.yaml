@@ -4,9 +4,21 @@ sampling_frequency: 500
 channels: [I, II, III, AVR, AVL, AVF, V1, V2, V3, V4, V5, V6]
 channel_size: 5000
 patch_size: 25
-min_block_size: 10
-min_keep_ratio: 0.15
-max_keep_ratio: 0.25
+
+# --- Masking Strategy ---
+# To use original ECG-JEPA, set masking_strategy to 'ecg-jepa' and fill these:
+# masking_strategy: 'ecg-jepa'
+# min_block_size: 10
+# min_keep_ratio: 0.15
+# max_keep_ratio: 0.25
+
+# To use I-JEPA, set masking_strategy to 'i-jepa' and fill these:
+masking_strategy: 'i-jepa'
+context_scale: [0.85, 1.0]
+n_pred_blocks: 4
+pred_scale: [0.15, 0.2]
+allow_overlap: False
+
 datasets:
   ptb-xl: 1.
 # model architecture
