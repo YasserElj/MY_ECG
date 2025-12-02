@@ -286,6 +286,8 @@ def main():
     model = torch.compile(model)
 
   step_time = AverageMeter()
+  data_time = AverageMeter()  # Time for data loading + masking
+  forward_time = AverageMeter()  # Time for forward + backward
   train_loss = AverageMeter()
 
   best_loss = None
@@ -298,7 +300,9 @@ def main():
     # forward and backward pass
     batch_loss = 0.
     for _ in range(config.gradient_accumulation_steps):
+      data_start = time()
       x, mask_encoder, mask_predictor = next(train_iterator)
+      data_time.update(time() - data_start)
       
       # Handle different mask formats
       if use_ijepa_model:
@@ -324,10 +328,12 @@ def main():
           
       if (step + 1) % 100 == 0:
           logging.getLogger('app').info(f"[mask] keep_ratio≈{kr:.3f}")
+      forward_start = time()
       with auto_mixed_precision:
         loss = model(x, mask_encoder, mask_predictor)
         loss = loss / config.gradient_accumulation_steps
       loss.backward()
+      forward_time.update(time() - forward_start)
       batch_loss += loss.item()
     # update weights
     if config.gradient_clip > 0:
@@ -350,8 +356,12 @@ def main():
     if (step + 1) % 100 == 0:
       logger.info(f'[{step + 1:06d}] '
                   f'step_time {step_time.value:.4f} '
+                  f'data_time {data_time.value:.4f} '
+                  f'forward_time {forward_time.value:.4f} '
                   f'train_loss {train_loss.value:.4f}')
       step_time = AverageMeter()
+      data_time = AverageMeter()
+      forward_time = AverageMeter()
       train_loss = AverageMeter()
 
     if (step + 1) % 200 == 0:
