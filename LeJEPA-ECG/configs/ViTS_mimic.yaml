@@ -1,0 +1,73 @@
+# LeJEPA-ECG Configuration
+# ViT-Small encoder for MIMIC-IV ECG pretraining
+
+# Data
+sampling_frequency: 500
+channels:
+  - I
+  - II
+  - III
+  - AVR
+  - AVL
+  - AVF
+  - V1
+  - V2
+  - V3
+  - V4
+  - V5
+  - V6
+channel_size: 5000
+patch_size: 25
+
+# Datasets
+datasets:
+  mimic-iv-ecg: 1.0
+
+# Model Architecture
+dim: 384
+depth: 8
+num_heads: 6
+mlp_ratio: 4.0
+qkv_bias: false
+dropout: 0.0
+attn_dropout: 0.0
+num_registers: 1
+bias: true
+norm_eps: 1.0e-6
+layer_scale_eps: 0.0
+
+# Projector
+proj_hidden_dim: 2048
+proj_dim: 128
+
+# LeJEPA
+num_views: 4
+lambda: 0.02
+num_slices: 1024
+
+# Augmentation
+crop_scale:
+  - 0.5
+  - 1.0
+amplitude_scale:
+  - 0.8
+  - 1.2
+noise_std: 0.05
+
+# Training
+steps: 100000
+batch_size: 256
+learning_rate: 0.0005
+final_learning_rate: 1.0e-6
+learning_rate_warmup_steps: 5000
+weight_decay: 0.05
+opt_betas:
+  - 0.9
+  - 0.999
+opt_eps: 1.0e-8
+gradient_clip: 1.0
+gradient_accumulation_steps: 1
+
+# Checkpointing
+checkpoint_interval: 10000
+
