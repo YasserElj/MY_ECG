@@ -8,8 +8,8 @@ No masking, no teacher-student, no EMA - just simple invariance + Gaussian regul
 import argparse
 import logging.config
 import pprint
-import sys
 from contextlib import nullcontext
+from datetime import datetime
 from os import path, makedirs
 from time import time
 
@@ -17,6 +17,12 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 from data import transforms
 from data.datasets import DATASETS, MIMIC_IV_ECG, PTB_XL
@@ -32,6 +38,8 @@ parser.add_argument('--data', nargs='+', required=True, help='dataset=path/to/da
 parser.add_argument('--out', default='checkpoints', help='output directory')
 parser.add_argument('--config', default='ViTS_mimic', help='config file name')
 parser.add_argument('--amp', default='bfloat16', choices=['bfloat16', 'float32'])
+parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
+parser.add_argument('--run-name', default=None, help='wandb run name')
 args = parser.parse_args()
 
 
@@ -51,6 +59,49 @@ def load_config(config_name):
         raise ValueError(f'Config file not found: {config_path}')
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
+
+
+def get_gpu_stats():
+    """Get GPU memory and utilization stats."""
+    if not torch.cuda.is_available():
+        return {}
+    return {
+        'system/gpu_memory_allocated_gb': torch.cuda.memory_allocated() / 1e9,
+        'system/gpu_memory_reserved_gb': torch.cuda.memory_reserved() / 1e9,
+        'system/gpu_max_memory_gb': torch.cuda.max_memory_allocated() / 1e9,
+    }
+
+
+def get_gradient_norm(model):
+    """Compute total gradient norm."""
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total_norm += p.grad.data.norm(2).item() ** 2
+    return total_norm ** 0.5
+
+
+def create_pca_plot(embeddings, n_samples=1000):
+    """Create PCA visualization of embeddings."""
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    
+    emb = embeddings.detach().cpu().numpy()
+    if len(emb) > n_samples:
+        idx = np.random.choice(len(emb), n_samples, replace=False)
+        emb = emb[idx]
+    
+    pca = PCA(n_components=2)
+    emb_2d = pca.fit_transform(emb)
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    scatter = ax.scatter(emb_2d[:, 0], emb_2d[:, 1], alpha=0.5, s=10, c=np.arange(len(emb_2d)), cmap='viridis')
+    ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+    ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+    ax.set_title('Embedding PCA')
+    plt.colorbar(scatter, ax=ax, label='Sample index')
+    plt.tight_layout()
+    return fig
 
 
 class PreprocessECG:
@@ -107,6 +158,25 @@ def main():
     # Load config
     config = load_config(args.config)
     logger.debug(f'Config:\n{pprint.pformat(config, compact=True, width=100)}')
+
+    # Wandb config
+    use_wandb = args.wandb and WANDB_AVAILABLE
+    wandb_log_interval = config.get('wandb_log_interval', 10)
+    wandb_viz_interval = config.get('wandb_viz_interval', 1000)
+    wandb_project = config.get('wandb_project', 'LeJEPA-ECG')
+    
+    if args.wandb and not WANDB_AVAILABLE:
+        logger.warning('wandb not installed, skipping wandb logging')
+    
+    if use_wandb:
+        run_name = args.run_name or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        wandb.init(
+            project=wandb_project,
+            name=run_name,
+            config=config,
+            tags=['lejepa', 'ecg', 'pretraining']
+        )
+        logger.info(f'Wandb initialized: {wandb_project}/{run_name}')
 
     # Parse data arguments
     dump_files = {}
@@ -189,6 +259,12 @@ def main():
         use_sdp_kernel=using_cuda
     ).to(device)
 
+    # Log model info
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.info(f'Model parameters: {num_params / 1e6:.2f}M')
+    if use_wandb:
+        wandb.config.update({'num_params': num_params})
+
     # Create SIGReg loss
     sigreg = SIGReg(num_slices=config['num_slices']).to(device)
 
@@ -211,10 +287,12 @@ def main():
     # Training
     lamb = config['lambda']
     step_time = AverageMeter()
+    data_time = AverageMeter()
     train_loss = AverageMeter()
     inv_loss_meter = AverageMeter()
     sigreg_loss_meter = AverageMeter()
     best_loss = None
+    total_samples = 0
 
     logger.info(f'Starting LeJEPA pretraining for {config["steps"]} steps')
     logger.info(f'λ={lamb}, num_views={config["num_views"]}, proj_dim={config["proj_dim"]}')
@@ -223,25 +301,39 @@ def main():
         step_start = time()
 
         # Update learning rate
-        update_learning_rate_(optimizer, next(lr_schedule))
+        lr = next(lr_schedule)
+        update_learning_rate_(optimizer, lr)
 
         # Forward pass
         batch_loss = 0.
         batch_inv = 0.
         batch_sigreg = 0.
+        last_emb = None
+        last_proj = None
 
         for _ in range(config['gradient_accumulation_steps']):
+            data_start = time()
             views = next(train_iterator)  # (B, V, C, T)
+            data_time.update(time() - data_start)
+            
+            batch_size = views.size(0)
+            total_samples += batch_size
 
             with amp_context:
                 emb, proj = model(views)
                 loss, inv_loss, sigreg_loss = compute_lejepa_loss(proj, sigreg, lamb)
                 loss = loss / config['gradient_accumulation_steps']
+            
+            last_emb = emb.detach()
+            last_proj = proj.detach()
 
             loss.backward()
             batch_loss += loss.item()
             batch_inv += inv_loss.item() / config['gradient_accumulation_steps']
             batch_sigreg += sigreg_loss.item() / config['gradient_accumulation_steps']
+
+        # Get gradient norm before clipping
+        grad_norm = get_gradient_norm(model)
 
         # Gradient clipping
         if config['gradient_clip'] > 0:
@@ -251,23 +343,65 @@ def main():
         optimizer.zero_grad(set_to_none=True)
 
         # Update meters
+        step_elapsed = time() - step_start
         train_loss.update(batch_loss)
         inv_loss_meter.update(batch_inv)
         sigreg_loss_meter.update(batch_sigreg)
-        step_time.update(time() - step_start)
+        step_time.update(step_elapsed)
+        
+        throughput = batch_size * config['num_views'] / step_elapsed
 
-        # Logging
+        # Wandb logging (every step or interval)
+        if use_wandb and (step + 1) % wandb_log_interval == 0:
+            log_dict = {
+                'train/loss': batch_loss,
+                'train/inv_loss': batch_inv,
+                'train/sigreg_loss': batch_sigreg,
+                'train/lr': lr,
+                'train/step_time': step_elapsed,
+                'train/throughput': throughput,
+                'train/total_samples': total_samples,
+                'gradients/norm': grad_norm,
+            }
+            
+            # Embedding stats
+            if last_proj is not None:
+                proj_flat = last_proj.reshape(-1, last_proj.size(-1))
+                log_dict.update({
+                    'embeddings/proj_mean': proj_flat.mean().item(),
+                    'embeddings/proj_std': proj_flat.std().item(),
+                    'embeddings/proj_norm': proj_flat.norm(dim=-1).mean().item(),
+                })
+            
+            # GPU stats (less frequent)
+            if (step + 1) % 100 == 0:
+                log_dict.update(get_gpu_stats())
+            
+            wandb.log(log_dict, step=step + 1)
+
+        # PCA visualization
+        if use_wandb and (step + 1) % wandb_viz_interval == 0 and last_emb is not None:
+            try:
+                fig = create_pca_plot(last_emb)
+                wandb.log({'embeddings/pca': wandb.Image(fig)}, step=step + 1)
+                plt.close(fig)
+            except Exception as e:
+                logger.warning(f'Failed to create PCA plot: {e}')
+
+        # Console logging
         if (step + 1) % 100 == 0:
-            lr = optimizer.param_groups[0]['lr']
+            gpu_mem = torch.cuda.memory_allocated() / 1e9 if using_cuda else 0
             logger.info(
                 f'[{step + 1:06d}] '
-                f'step_time={step_time.value:.4f} '
+                f'time={step_time.value:.3f}s '
                 f'loss={train_loss.value:.4f} '
                 f'inv={inv_loss_meter.value:.4f} '
-                f'sigreg={sigreg_loss_meter.value:.4f} '
-                f'lr={lr:.2e}'
+                f'sigreg={sigreg_loss_meter.value:.2f} '
+                f'lr={lr:.2e} '
+                f'gpu={gpu_mem:.1f}GB'
             )
             step_time = AverageMeter()
+            data_time = AverageMeter()
             train_loss = AverageMeter()
             inv_loss_meter = AverageMeter()
             sigreg_loss_meter = AverageMeter()
@@ -282,6 +416,9 @@ def main():
                 'step': step + 1,
             }, ckpt_path)
             logger.info(f'Saved {ckpt_path}')
+            
+            if use_wandb:
+                wandb.save(ckpt_path)
 
         # Best checkpoint
         if best_loss is None or batch_loss < best_loss:
@@ -297,8 +434,14 @@ def main():
                 logger.info(f'[BEST] step {step + 1} | loss={best_loss:.4f}')
 
     logger.info('Training complete!')
+    
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == '__main__':
+    # Import matplotlib here to avoid issues if not installed
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
     main()
-

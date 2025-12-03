@@ -28,5 +28,6 @@ python pretrain.py \
     --data "mimic-iv-ecg=../dataset/mimic-ecg.npy" \
     --out "checkpoints/" \
     --config "ViTS_mimic" \
-    --amp "bfloat16"
+    --amp "bfloat16" \
+    --wandb
 
