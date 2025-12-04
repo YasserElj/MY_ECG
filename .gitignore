@@ -2,3 +2,4 @@ dataset/
 *.zip
 *.pt
 *.npz
+__pycache__
