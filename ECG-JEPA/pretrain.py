@@ -271,12 +271,12 @@ def main():
     ).to(device)
   else:
     logger.info('Initializing original JEPA model.')
-  model = original_model = JEPA(
-    config=config,
-    momentum_schedule=momentum_schedule,
-    use_sdp_kernel=using_cuda
-  ).to(device)
-  optimizer = model.get_optimizer(fused=using_cuda)
+    model = original_model = JEPA(
+      config=config,
+      momentum_schedule=momentum_schedule,
+      use_sdp_kernel=using_cuda
+    ).to(device)
+    optimizer = model.get_optimizer(fused=using_cuda)
 
   if chkpt is not None:  # resume training from checkpoint
     model.load_state_dict(chkpt['model'])
