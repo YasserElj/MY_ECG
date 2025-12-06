@@ -56,7 +56,7 @@ noise_std: 0.05
 
 # Training
 steps: 100000
-batch_size: 256  # Reduced to fit in GPU (4 views × 256 = 1024 effective per forward)
+batch_size: 1024  # 1024 × 4 views = 4096 samples per forward pass
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000
@@ -66,10 +66,10 @@ opt_betas:
   - 0.999
 opt_eps: 1.0e-8
 gradient_clip: 1.0
-gradient_accumulation_steps: 4  # 256 × 4 = 1024 effective batch size
+gradient_accumulation_steps: 1  # No accumulation needed, ~4× faster than original
 
 # Checkpointing
-checkpoint_interval: 10000
+checkpoint_interval: 5000
 
 # Wandb
 wandb_project: "LeJEPA-ECG"

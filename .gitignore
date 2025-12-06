@@ -3,3 +3,4 @@ dataset/
 *.pt
 *.npz
 __pycache__
+wandb/

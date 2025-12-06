@@ -40,6 +40,7 @@ parser.add_argument('--config', default='ViTS_mimic', help='config file name')
 parser.add_argument('--amp', default='bfloat16', choices=['bfloat16', 'float32'])
 parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
 parser.add_argument('--run-name', default=None, help='wandb run name')
+parser.add_argument('--resume', default=None, help='path to checkpoint to resume from')
 args = parser.parse_args()
 
 
@@ -275,7 +276,25 @@ def main():
         fused=using_cuda
     )
 
-    # Learning rate schedule
+    # Resume from checkpoint
+    start_step = 0
+    best_loss = None
+    total_samples = 0
+    
+    if args.resume:
+        if path.isfile(args.resume):
+            logger.info(f'Resuming from checkpoint: {args.resume}')
+            ckpt = torch.load(args.resume, map_location=device)
+            model.load_state_dict(ckpt['model'])
+            optimizer.load_state_dict(ckpt['optimizer'])
+            start_step = ckpt.get('step', 0)
+            best_loss = ckpt.get('loss', None)
+            total_samples = ckpt.get('total_samples', 0)
+            logger.info(f'Resumed from step {start_step}, best_loss={best_loss}')
+        else:
+            logger.warning(f'Checkpoint not found: {args.resume}, starting from scratch')
+
+    # Learning rate schedule (create full schedule, will skip to start_step)
     lr_schedule = cosine_schedule(
         total_steps=config['steps'],
         start_value=config['learning_rate'],
@@ -283,6 +302,10 @@ def main():
         warmup_steps=config['learning_rate_warmup_steps'],
         warmup_start_value=1e-6
     )
+    
+    # Skip LR schedule to start_step
+    for _ in range(start_step):
+        next(lr_schedule)
 
     # Training
     lamb = config['lambda']
@@ -291,13 +314,12 @@ def main():
     train_loss = AverageMeter()
     inv_loss_meter = AverageMeter()
     sigreg_loss_meter = AverageMeter()
-    best_loss = None
-    total_samples = 0
 
-    logger.info(f'Starting LeJEPA pretraining for {config["steps"]} steps')
+    remaining_steps = config['steps'] - start_step
+    logger.info(f'Starting LeJEPA pretraining for {remaining_steps} steps (from {start_step} to {config["steps"]})')
     logger.info(f'λ={lamb}, num_views={config["num_views"]}, proj_dim={config["proj_dim"]}')
 
-    for step in range(config['steps']):
+    for step in range(start_step, config['steps']):
         step_start = time()
 
         # Update learning rate
@@ -414,23 +436,27 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'config': config,
                 'step': step + 1,
+                'loss': train_loss.avg,
+                'total_samples': total_samples,
             }, ckpt_path)
             logger.info(f'Saved {ckpt_path}')
             
             if use_wandb:
                 wandb.save(ckpt_path)
 
-        # Best checkpoint
-        if best_loss is None or batch_loss < best_loss:
-            best_loss = batch_loss
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'config': config,
-                'step': step + 1,
-                'loss': best_loss,
-            }, path.join(args.out, 'best_ckpt.pt'))
-            if (step + 1) % 100 == 0:
+        # Best checkpoint (check every 100 steps using smoothed loss)
+        if (step + 1) % 100 == 0:
+            avg_loss = train_loss.value
+            if avg_loss is not None and (best_loss is None or avg_loss < best_loss):
+                best_loss = avg_loss
+                torch.save({
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'config': config,
+                    'step': step + 1,
+                    'loss': best_loss,
+                    'total_samples': total_samples,
+                }, path.join(args.out, 'best_ckpt.pt'))
                 logger.info(f'[BEST] step {step + 1} | loss={best_loss:.4f}')
 
     logger.info('Training complete!')

@@ -30,4 +30,5 @@ python pretrain.py \
     --config "ViTS_mimic" \
     --amp "bfloat16" \
     --wandb
+    # --resume "checkpoints/chkpt_10000.pt"  # Uncomment to resume from checkpoint
 
