@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=250G
 
-#SBATCH --output=outputs/pretrain.log
-#SBATCH --error=errors/pretrain.log
+#SBATCH --output=outputs/pretrain_30k.log
+#SBATCH --error=errors/pretrain_30k.log
 
 module purge
 mkdir -p outputs errors checkpoints
@@ -27,8 +27,9 @@ export MKL_NUM_THREADS=16
 python pretrain.py \
     --data "mimic-iv-ecg=../dataset/mimic-ecg.npy" \
     --out "checkpoints/" \
-    --config "ViTS_mimic" \
+    --config "ViTS_mimic_a100" \
     --amp "bfloat16" \
-    --wandb
-    # --resume "checkpoints/chkpt_10000.pt"  # Uncomment to resume from checkpoint
+    --wandb \
+    --run-name "Resume_from_30k" \
+    --resume "checkpoints/chkpt_30000.pt"
 

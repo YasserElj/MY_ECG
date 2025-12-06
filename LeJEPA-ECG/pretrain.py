@@ -66,10 +66,16 @@ def get_gpu_stats():
     """Get GPU memory and utilization stats."""
     if not torch.cuda.is_available():
         return {}
+    
+    allocated = torch.cuda.memory_allocated() / 1e9
+    reserved = torch.cuda.memory_reserved() / 1e9
+    peak = torch.cuda.max_memory_allocated() / 1e9
+    
     return {
-        'system/gpu_memory_allocated_gb': torch.cuda.memory_allocated() / 1e9,
-        'system/gpu_memory_reserved_gb': torch.cuda.memory_reserved() / 1e9,
-        'system/gpu_max_memory_gb': torch.cuda.max_memory_allocated() / 1e9,
+        'system/gpu_memory_allocated_gb': allocated,
+        'system/gpu_memory_reserved_gb': reserved,
+        'system/gpu_peak_memory_gb': peak,
+        'system/gpu_utilization_pct': (allocated / reserved * 100) if reserved > 0 else 0,
     }
 
 
@@ -395,9 +401,8 @@ def main():
                     'embeddings/proj_norm': proj_flat.norm(dim=-1).mean().item(),
                 })
             
-            # GPU stats (less frequent)
-            if (step + 1) % 100 == 0:
-                log_dict.update(get_gpu_stats())
+            # GPU stats - log every time for visibility
+            log_dict.update(get_gpu_stats())
             
             wandb.log(log_dict, step=step + 1)
 
@@ -412,7 +417,7 @@ def main():
 
         # Console logging
         if (step + 1) % 100 == 0:
-            gpu_mem = torch.cuda.memory_allocated() / 1e9 if using_cuda else 0
+            gpu_mem = torch.cuda.max_memory_allocated() / 1e9 if using_cuda else 0
             logger.info(
                 f'[{step + 1:06d}] '
                 f'time={step_time.value:.3f}s '
@@ -420,7 +425,7 @@ def main():
                 f'inv={inv_loss_meter.value:.4f} '
                 f'sigreg={sigreg_loss_meter.value:.2f} '
                 f'lr={lr:.2e} '
-                f'gpu={gpu_mem:.1f}GB'
+                f'gpu={gpu_mem:.1f}GB (peak)'
             )
             step_time = AverageMeter()
             data_time = AverageMeter()

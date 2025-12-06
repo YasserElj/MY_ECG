@@ -1,25 +1,10 @@
-# LeJEPA-ECG Configuration (Default - RTX 6000 Ada / 48GB VRAM)
-# ViT-Small encoder for MIMIC-IV ECG pretraining
-#
-# GPU-specific configs available:
-#   - ViTS_mimic_rtx6000.yaml  → RTX 6000 Ada (48GB): batch=256, grad_accum=4
-#   - ViTS_mimic_a100.yaml     → A100 (80GB):        batch=512, grad_accum=2 (2× faster)
+# LeJEPA-ECG Configuration - A100 (80GB VRAM)
+# batch_size=512 × 4 views = 2048 samples/forward → ~50GB peak VRAM
+# 2× faster than RTX 6000 config with same effective batch size
 
 # Data
 sampling_frequency: 500
-channels:
-  - I
-  - II
-  - III
-  - AVR
-  - AVL
-  - AVF
-  - V1
-  - V2
-  - V3
-  - V4
-  - V5
-  - V6
+channels: [I, II, III, AVR, AVL, AVF, V1, V2, V3, V4, V5, V6]
 channel_size: 5000
 patch_size: 25
 
@@ -27,7 +12,7 @@ patch_size: 25
 datasets:
   mimic-iv-ecg: 1.0
 
-# Model Architecture
+# Model Architecture (ViT-Small)
 dim: 384
 depth: 8
 num_heads: 6
@@ -50,27 +35,21 @@ lambda: 0.02
 num_slices: 1024
 
 # Augmentation
-crop_scale:
-  - 0.5
-  - 1.0
-amplitude_scale:
-  - 0.8
-  - 1.2
+crop_scale: [0.5, 1.0]
+amplitude_scale: [0.8, 1.2]
 noise_std: 0.05
 
-# Training
+# Training - A100 (80GB) - 2× faster than RTX 6000 config
 steps: 100000
-batch_size: 256  # 256 × 4 views = 1024 samples → ~25GB VRAM
+batch_size: 512              # ~50GB peak VRAM
+gradient_accumulation_steps: 2   # Effective batch = 1024
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000
 weight_decay: 0.05
-opt_betas:
-  - 0.9
-  - 0.999
+opt_betas: [0.9, 0.999]
 opt_eps: 1.0e-8
 gradient_clip: 1.0
-gradient_accumulation_steps: 4  # Effective batch = 256 × 4 = 1024
 
 # Checkpointing
 checkpoint_interval: 5000
