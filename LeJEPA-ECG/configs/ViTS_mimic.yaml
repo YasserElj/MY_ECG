@@ -2,8 +2,8 @@
 # ViT-Small encoder for MIMIC-IV ECG pretraining
 #
 # GPU-specific configs available:
-#   - ViTS_mimic_rtx6000.yaml  → RTX 6000 Ada (48GB): batch=256, grad_accum=4
-#   - ViTS_mimic_a100.yaml     → A100 (80GB):        batch=512, grad_accum=2 (2× faster)
+#   - ViTS_mimic_rtx6000.yaml  → RTX 6000 Ada (48GB): batch=440, grad_accum=4, ~42GB
+#   - ViTS_mimic_a100.yaml     → A100 (80GB):        batch=700, grad_accum=2, ~67GB (~1.6× faster)
 
 # Data
 sampling_frequency: 500
@@ -60,7 +60,7 @@ noise_std: 0.05
 
 # Training
 steps: 100000
-batch_size: 256  # 256 × 4 views = 1024 samples → ~25GB VRAM
+batch_size: 440  # 440 × 4 views = 1760 samples → ~42GB VRAM (RTX 6000 tested)
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000
@@ -70,7 +70,7 @@ opt_betas:
   - 0.999
 opt_eps: 1.0e-8
 gradient_clip: 1.0
-gradient_accumulation_steps: 4  # Effective batch = 256 × 4 = 1024
+gradient_accumulation_steps: 4  # Effective batch = 440 × 4 = 1760
 
 # Checkpointing
 checkpoint_interval: 5000

@@ -1,5 +1,5 @@
 # LeJEPA-ECG Configuration - RTX 6000 Ada (48GB VRAM)
-# batch_size=256 × 4 views = 1024 samples/forward → ~25GB peak VRAM
+# batch_size=440 × 4 views = 1760 samples/forward → ~42GB peak VRAM
 
 # Data
 sampling_frequency: 500
@@ -40,8 +40,8 @@ noise_std: 0.05
 
 # Training - RTX 6000 Ada (48GB)
 steps: 100000
-batch_size: 256              # ~25GB peak VRAM
-gradient_accumulation_steps: 4   # Effective batch = 1024
+batch_size: 440              # ~42GB peak VRAM (tested max)
+gradient_accumulation_steps: 4   # Effective batch = 1760
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000
