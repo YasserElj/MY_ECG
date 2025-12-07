@@ -441,7 +441,7 @@ def main():
                 'optimizer': optimizer.state_dict(),
                 'config': config,
                 'step': step + 1,
-                'loss': train_loss.avg,
+                'loss': train_loss.value,
                 'total_samples': total_samples,
             }, ckpt_path)
             logger.info(f'Saved {ckpt_path}')
