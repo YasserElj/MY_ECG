@@ -30,7 +30,8 @@ python pretrain.py \
     --config "ViTS_mimic_a100" \
     --amp "bfloat16" \
     --wandb \
-    --run-name "LeJEPA_pretrain"
+    --run-name "LeJEPA_pretrain" \
+    --seed 42
 
 # To resume from checkpoint:
 # python pretrain.py \
@@ -40,5 +41,6 @@ python pretrain.py \
 #     --amp "bfloat16" \
 #     --wandb \
 #     --run-name "LeJEPA_resume" \
-#     --resume "checkpoints/chkpt_30000.pt"
+#     --resume "checkpoints/chkpt_30000.pt" \
+#     --seed 42
 

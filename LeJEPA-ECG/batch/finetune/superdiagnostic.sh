@@ -30,5 +30,6 @@ python -m finetune \
     --config "linear" \
     --task "superdiagnostic" \
     --wandb \
-    --run-name "finetune_superdiagnostic"
+    --run-name "finetune_superdiagnostic" \
+    --seed 42
 

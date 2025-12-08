@@ -8,6 +8,7 @@ No masking, no teacher-student, no EMA - just simple invariance + Gaussian regul
 import argparse
 import logging.config
 import pprint
+import random
 from contextlib import nullcontext
 from datetime import datetime
 from os import path, makedirs
@@ -17,6 +18,15 @@ import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 try:
     import wandb
@@ -41,6 +51,7 @@ parser.add_argument('--amp', default='bfloat16', choices=['bfloat16', 'float32']
 parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
 parser.add_argument('--run-name', default=None, help='wandb run name')
 parser.add_argument('--resume', default=None, help='path to checkpoint to resume from')
+parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
 args = parser.parse_args()
 
 
@@ -144,6 +155,10 @@ def main():
     logging.config.fileConfig('logging.ini')
     logger = logging.getLogger('app')
 
+    # Set random seed for reproducibility
+    set_seed(args.seed)
+    logger.info(f'Random seed set to {args.seed}')
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     using_cuda = device.type == 'cuda'
     num_cpus = get_cpu_count()
@@ -180,7 +195,7 @@ def main():
         wandb.init(
             project=wandb_project,
             name=run_name,
-            config=config,
+            config={**config, 'seed': args.seed},
             tags=['lejepa', 'ecg', 'pretraining']
         )
         logger.info(f'Wandb initialized: {wandb_project}/{run_name}')
@@ -443,6 +458,7 @@ def main():
                 'step': step + 1,
                 'loss': train_loss.value,
                 'total_samples': total_samples,
+                'seed': args.seed,
             }, ckpt_path)
             logger.info(f'Saved {ckpt_path}')
             
@@ -461,6 +477,7 @@ def main():
                     'step': step + 1,
                     'loss': best_loss,
                     'total_samples': total_samples,
+                    'seed': args.seed,
                 }, path.join(args.out, 'best_ckpt.pt'))
                 logger.info(f'[BEST] step {step + 1} | loss={best_loss:.4f}')
 

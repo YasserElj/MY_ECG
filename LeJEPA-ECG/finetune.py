@@ -9,6 +9,7 @@ import argparse
 import copy
 import logging.config
 import pprint
+import random
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass, asdict
@@ -21,6 +22,15 @@ import yaml
 from sklearn.metrics import roc_auc_score
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 try:
     import wandb
@@ -68,6 +78,7 @@ parser.add_argument('--val-fold', choices=FOLDS, type=int, default=9, help='vali
 parser.add_argument('--test-fold', choices=FOLDS, type=int, default=10, help='test fold')
 parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
 parser.add_argument('--run-name', default=None, help='wandb run name')
+parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
 args = parser.parse_args()
 
 
@@ -108,6 +119,10 @@ def main():
     makedirs(args.out, exist_ok=True)
     logging.config.fileConfig('logging.ini')
     logger = logging.getLogger('app')
+
+    # Set random seed for reproducibility
+    set_seed(args.seed)
+    logger.info(f'Random seed set to {args.seed}')
 
     dump_file = args.dump or f'{args.data_dir}.npy'
     if not path.isfile(dump_file):
@@ -313,6 +328,7 @@ def main():
                 'train_samples': int(train_mask.sum()),
                 'val_samples': int(val_mask.sum()),
                 'test_samples': int(test_mask.sum()),
+                'seed': args.seed,
                 **asdict(eval_config),
                 **asdict(encoder_config),
             }

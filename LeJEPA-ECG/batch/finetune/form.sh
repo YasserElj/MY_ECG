@@ -30,5 +30,6 @@ python -m finetune \
     --config "linear" \
     --task "form" \
     --wandb \
-    --run-name "finetune_form"
+    --run-name "finetune_form" \
+    --seed 42
 

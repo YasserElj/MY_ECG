@@ -1,6 +1,6 @@
 # LeJEPA-ECG Configuration - A100 (80GB VRAM)
-# batch_size=700 × 4 views = 2800 samples/forward → ~67GB peak VRAM
-# ~1.6× faster than RTX 6000 config (440×4 vs 700×2 forward passes)
+# batch_size=512 × 4 grad_accum × 4 views = 2048 effective batch
+# Power-of-2 batch size for optimal Tensor Core utilization
 
 # Data
 sampling_frequency: 500
@@ -39,10 +39,10 @@ crop_scale: [0.5, 1.0]
 amplitude_scale: [0.8, 1.2]
 noise_std: 0.05
 
-# Training - A100 (80GB) - ~2× faster than RTX 6000 config
+# Training - A100 (80GB) - same as ECG-JEPA effective batch
 steps: 100000
-batch_size: 700              # ~67GB peak VRAM (safe headroom)
-gradient_accumulation_steps: 2   # Effective batch = 1400
+batch_size: 512
+gradient_accumulation_steps: 4   # Effective batch = 2048
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000

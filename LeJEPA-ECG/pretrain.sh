@@ -3,15 +3,15 @@
 #SBATCH --partition gpu
 #SBATCH --qos default-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --job-name=lejepa_ecg_pretrain
+#SBATCH --job-name=512_lejepa_ecg_pretrain
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=250G
 
-#SBATCH --output=outputs/pretrain_30k.log
-#SBATCH --error=errors/pretrain_30k.log
+#SBATCH --output=outputs/pretrain_bs512.log
+#SBATCH --error=errors/pretrain_bs512.log
 
 module purge
-mkdir -p outputs errors checkpoints
+mkdir -p outputs errors checkpoints512
 
 # Activate conda environment
 eval "$(conda shell.bash hook)"
@@ -26,10 +26,11 @@ export MKL_NUM_THREADS=16
 
 python pretrain.py \
     --data "mimic-iv-ecg=../dataset/mimic-ecg.npy" \
-    --out "checkpoints/" \
+    --out "checkpoints512/" \
     --config "ViTS_mimic_a100" \
     --amp "bfloat16" \
     --wandb \
-    --run-name "Resume_from_30k" \
-    --resume "checkpoints/chkpt_30000.pt"
+    --run-name "pretrain_bs512" \
+    --seed 42
+    # --resume "checkpoints/chkpt_30000.pt"
 

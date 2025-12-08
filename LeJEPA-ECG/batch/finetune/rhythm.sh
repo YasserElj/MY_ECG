@@ -30,5 +30,6 @@ python -m finetune \
     --config "linear" \
     --task "rhythm" \
     --wandb \
-    --run-name "finetune_rhythm"
+    --run-name "finetune_rhythm" \
+    --seed 42
 
