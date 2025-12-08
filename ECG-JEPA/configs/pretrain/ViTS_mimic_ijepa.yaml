@@ -35,7 +35,7 @@ layer_scale_eps: 0.
 
 # training
 steps: 100_000
-batch_size: 2048
+batch_size: 512
 encoder_momentum: 0.998
 final_encoder_momentum: 0.9995
 learning_rate: 1.0e-3
