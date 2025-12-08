@@ -161,3 +161,130 @@ class Projector(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
+class CrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        proj_dim=None,
+        qkv_bias=False,
+        bias=True,
+        use_sdp_kernel=True
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        assert dim % num_heads == 0
+        head_dim = dim // num_heads
+        proj_dim = proj_dim or dim
+        self.scale = head_dim ** -0.5
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, int(dim * 2), bias=qkv_bias)
+        self.proj = nn.Linear(dim, proj_dim, bias=bias)
+        self.use_sdp_kernel = use_sdp_kernel
+
+    def forward(self, q, x):
+        B, n, C = q.shape
+        q = self.q(q).reshape(B, n, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        B, N, C = x.shape
+        kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+        if self.use_sdp_kernel:
+            q = F.scaled_dot_product_attention(q, k, v)
+        else:
+            xattn = (q @ k.transpose(-2, -1)) * self.scale
+            xattn = xattn.softmax(dim=-1)
+            q = (xattn @ v)
+        q = q.transpose(1, 2).reshape(B, n, C)
+        q = self.proj(q)
+        return q
+
+
+class CrossAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.,
+        qkv_bias=False,
+        bias=True,
+        eps=1e-6,
+        use_sdp_kernel=True,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, eps=eps, bias=bias)
+        self.xattn = CrossAttention(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            bias=bias,
+            use_sdp_kernel=use_sdp_kernel)
+        self.norm2 = nn.LayerNorm(dim, eps=eps, bias=bias)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = MLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            bias=bias)
+
+    def forward(self, q, x):
+        q = q + self.xattn(q, self.norm1(x))
+        q = q + self.mlp(self.norm2(q))
+        return q
+
+
+class AttentivePooler(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        num_queries=1,
+        depth=1,
+        mlp_ratio=4.,
+        qkv_bias=False,
+        bias=True,
+        complete_block=False,
+        proj_dim=None,
+        eps=1e-6,
+        use_sdp_kernel=True
+    ):
+        super().__init__()
+        self.query_token = nn.Parameter(torch.empty(1, num_queries, dim))
+        nn.init.trunc_normal_(self.query_token, mean=0., std=0.02)
+        self.blocks = None
+        if complete_block:
+            self.cross_attention_block = CrossAttentionBlock(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                bias=bias,
+                eps=eps,
+                use_sdp_kernel=use_sdp_kernel)
+            if depth > 1:
+                self.blocks = nn.ModuleList([
+                    Block(
+                        dim=dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=qkv_bias,
+                        bias=bias,
+                        eps=1e-6,
+                        use_sdp_kernel=use_sdp_kernel)
+                    for _ in range(depth - 1)])
+        else:
+            self.cross_attention_block = CrossAttention(
+                dim=dim,
+                num_heads=num_heads,
+                proj_dim=proj_dim,
+                qkv_bias=qkv_bias,
+                bias=bias,
+                use_sdp_kernel=use_sdp_kernel)
+
+    def forward(self, x):
+        q = self.query_token.repeat(len(x), 1, 1)
+        q = self.cross_attention_block(q, x)
+        if self.blocks is not None:
+            for block in self.blocks:
+                q = block(q)
+        return q
+
