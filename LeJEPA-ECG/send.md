@@ -26,7 +26,7 @@ scp /home/yasser.eljarida/lustre/recsys-y8xnv0gztug/users/yasser.eljarida/code/M
 CUDA_VISIBLE_DEVICES=1 python pretrain.py     --data "mimic-iv-ecg=../dataset/Mimic-IV-All/mimic-ecg-mini.npy"     --out "checkpoints/"     --config "ViTS_mimic_rtx6000"     --amp "bfloat16" --wandb --run-name "test" --resume "checkpoints/chkpt_1.pt" --seed 42
 
 
-CUDA_VISIBLE_DEVICES=1 python -m finetune     --data-dir "../dataset/ptb-xl"     --encoder "checkpoints/chkpt_2.pt"     --out "eval/rhythm"     --config "linear"     --task "rhythm"     --wandb     --run-name "finetune_rhythm"
+CUDA_VISIBLE_DEVICES=1 python -m finetune     --data-dir "../dataset/ptb-xl"     --encoder "checkpoints/chkpt_2.pt"     --out "eval/rhythm"     --config "linear"     --task "rhythm"     --wandb     --run-name "finetune_test" --seed 42
 
 ```
 
