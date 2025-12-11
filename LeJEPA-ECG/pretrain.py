@@ -237,12 +237,13 @@ def main():
     logger.debug(f'Config:\n{pprint.pformat(config, compact=True, width=100)}')
 
     # Wandb config
-    use_wandb = args.wandb and WANDB_AVAILABLE
+    # Wandb only on main process
+    use_wandb = args.wandb and WANDB_AVAILABLE and is_main
     wandb_log_interval = config.get('wandb_log_interval', 10)
     wandb_viz_interval = config.get('wandb_viz_interval', 1000)
     wandb_project = config.get('wandb_project', 'LeJEPA-ECG')
     
-    if args.wandb and not WANDB_AVAILABLE:
+    if args.wandb and not WANDB_AVAILABLE and is_main:
         logger.warning('wandb not installed, skipping wandb logging')
     
     if use_wandb:
@@ -251,8 +252,8 @@ def main():
             entity=args.entity,
             project=wandb_project,
             name=run_name,
-            config={**config, 'seed': args.seed},
-            tags=['lejepa', 'ecg', 'pretraining']
+            config={**config, 'seed': args.seed, 'world_size': world_size},
+            tags=['lejepa', 'ecg', 'pretraining', f'{world_size}gpu' if distributed else '1gpu']
         )
         logger.info(f'Wandb initialized: {args.entity}/{wandb_project}/{run_name}')
 
@@ -301,32 +302,16 @@ def main():
         noise_std=config['noise_std']
     )
 
-    # Create dataset
+    # Create dataset (DatasetRouter is an infinite IterableDataset)
+    # Each GPU samples independently - no DistributedSampler needed
     train_dataset = DatasetRouter(datasets.values())
-    
-    # Use DistributedSampler for multi-GPU training
-    if distributed:
-        train_sampler = DistributedSampler(
-            train_dataset,
-            num_replicas=world_size,
-            rank=local_rank,
-            shuffle=True,
-            drop_last=True
-        )
-        shuffle = False  # Sampler handles shuffling
-    else:
-        train_sampler = None
-        shuffle = True
     
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=config['batch_size'],
-        shuffle=shuffle,
-        sampler=train_sampler,
         pin_memory=using_cuda,
         collate_fn=collate_fn,
-        num_workers=2,
-        drop_last=True
+        num_workers=2
     )
 
     def map_to_device(iterator):
