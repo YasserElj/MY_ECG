@@ -394,7 +394,7 @@ def main():
         sigreg_loss_meter.update(batch_sigreg)
         step_time.update(step_elapsed)
         
-        throughput = batch_size * config['num_views'] / step_elapsed
+        throughput = batch_size * config['gradient_accumulation_steps'] / step_elapsed
 
         # Wandb logging (every step or interval)
         if use_wandb and (step + 1) % wandb_log_interval == 0:
