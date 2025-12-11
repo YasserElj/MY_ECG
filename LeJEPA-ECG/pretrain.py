@@ -3,10 +3,15 @@ LeJEPA-ECG Pretraining Script
 
 Self-supervised pretraining using multi-view augmentation and SIGReg regularization.
 No masking, no teacher-student, no EMA - just simple invariance + Gaussian regularization.
+
+Supports both single-GPU and multi-GPU (DDP) training:
+  Single GPU:  python pretrain.py --config ViTS_mimic ...
+  Multi-GPU:   torchrun --nproc_per_node=2 pretrain.py --config ViTS_mimic ...
 """
 
 import argparse
 import logging.config
+import os
 import pprint
 import random
 from contextlib import nullcontext
@@ -16,8 +21,10 @@ from time import time
 
 import numpy as np
 import torch
-import yaml
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 
 def set_seed(seed: int):
@@ -27,6 +34,34 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def setup_distributed():
+    """
+    Setup distributed training if running with torchrun.
+    Returns (local_rank, world_size, is_main_process).
+    """
+    local_rank = int(os.environ.get('LOCAL_RANK', -1))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    
+    if local_rank >= 0:
+        # Running with torchrun
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        is_main = local_rank == 0
+    else:
+        # Single GPU mode
+        local_rank = 0
+        world_size = 1
+        is_main = True
+    
+    return local_rank, world_size, is_main
+
+
+def cleanup_distributed():
+    """Clean up distributed training resources."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 try:
     import wandb
@@ -152,18 +187,36 @@ class TransformECG:
 
 
 def main():
+    # Setup distributed training (will be single GPU if not using torchrun)
+    local_rank, world_size, is_main = setup_distributed()
+    distributed = world_size > 1
+    
     makedirs(args.out, exist_ok=True)
     logging.config.fileConfig('logging.ini')
     logger = logging.getLogger('app')
+    
+    # Only log from main process
+    if not is_main:
+        logger.setLevel(logging.WARNING)
 
-    # Set random seed for reproducibility
-    set_seed(args.seed)
-    logger.info(f'Random seed set to {args.seed}')
+    # Set random seed for reproducibility (offset by rank for variety)
+    set_seed(args.seed + local_rank)
+    if is_main:
+        logger.info(f'Random seed set to {args.seed}')
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    using_cuda = device.type == 'cuda'
+    # Set device based on local rank
+    if torch.cuda.is_available():
+        device = torch.device(f'cuda:{local_rank}')
+        using_cuda = True
+    else:
+        device = torch.device('cpu')
+        using_cuda = False
+    
     num_cpus = get_cpu_count()
-    logger.debug(f'Using {device} accelerator and {num_cpus} CPUs')
+    if is_main:
+        if distributed:
+            logger.info(f'Distributed training: {world_size} GPUs')
+        logger.debug(f'Using {device} accelerator and {num_cpus} CPUs')
 
     if using_cuda:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -247,12 +300,32 @@ def main():
         noise_std=config['noise_std']
     )
 
+    # Create dataset
+    train_dataset = DatasetRouter(datasets.values())
+    
+    # Use DistributedSampler for multi-GPU training
+    if distributed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=local_rank,
+            shuffle=True,
+            drop_last=True
+        )
+        shuffle = False  # Sampler handles shuffling
+    else:
+        train_sampler = None
+        shuffle = True
+    
     train_loader = DataLoader(
-        dataset=DatasetRouter(datasets.values()),
+        dataset=train_dataset,
         batch_size=config['batch_size'],
+        shuffle=shuffle,
+        sampler=train_sampler,
         pin_memory=using_cuda,
         collate_fn=collate_fn,
-        num_workers=2
+        num_workers=2,
+        drop_last=True
     )
 
     def map_to_device(iterator):
@@ -282,18 +355,29 @@ def main():
         proj_dim=config['proj_dim'],
         use_sdp_kernel=using_cuda
     ).to(device)
+    
+    # Wrap model in DDP for distributed training
+    if distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model_without_ddp = model.module
+    else:
+        model_without_ddp = model
 
     # Log model info
-    num_params = sum(p.numel() for p in model.parameters())
-    logger.info(f'Model parameters: {num_params / 1e6:.2f}M')
+    num_params = sum(p.numel() for p in model_without_ddp.parameters())
+    if is_main:
+        logger.info(f'Model parameters: {num_params / 1e6:.2f}M')
+        if distributed:
+            effective_batch = config['batch_size'] * world_size * config['gradient_accumulation_steps']
+            logger.info(f'Effective batch size: {effective_batch} (batch={config["batch_size"]} x gpus={world_size} x accum={config["gradient_accumulation_steps"]})')
     if use_wandb:
-        wandb.config.update({'num_params': num_params})
+        wandb.config.update({'num_params': num_params, 'world_size': world_size})
 
     # Create SIGReg loss
     sigreg = SIGReg(num_slices=config['num_slices']).to(device)
 
-    # Create optimizer
-    optimizer = model.get_optimizer(
+    # Create optimizer (use model_without_ddp to get optimizer from LeJEPA class)
+    optimizer = model_without_ddp.get_optimizer(
         lr=config['learning_rate'],
         weight_decay=config['weight_decay'],
         fused=using_cuda
@@ -306,16 +390,19 @@ def main():
     
     if args.resume:
         if path.isfile(args.resume):
-            logger.info(f'Resuming from checkpoint: {args.resume}')
+            if is_main:
+                logger.info(f'Resuming from checkpoint: {args.resume}')
             ckpt = torch.load(args.resume, map_location=device)
-            model.load_state_dict(ckpt['model'])
+            model_without_ddp.load_state_dict(ckpt['model'])
             optimizer.load_state_dict(ckpt['optimizer'])
             start_step = ckpt.get('step', 0)
             best_loss = ckpt.get('loss', None)
             total_samples = ckpt.get('total_samples', 0)
-            logger.info(f'Resumed from step {start_step}, best_loss={best_loss}')
+            if is_main:
+                logger.info(f'Resumed from step {start_step}, best_loss={best_loss}')
         else:
-            logger.warning(f'Checkpoint not found: {args.resume}, starting from scratch')
+            if is_main:
+                logger.warning(f'Checkpoint not found: {args.resume}, starting from scratch')
 
     # Learning rate schedule (create full schedule, will skip to start_step)
     lr_schedule = cosine_schedule(
@@ -339,8 +426,9 @@ def main():
     sigreg_loss_meter = AverageMeter()
 
     remaining_steps = config['steps'] - start_step
-    logger.info(f'Starting LeJEPA pretraining for {remaining_steps} steps (from {start_step} to {config["steps"]})')
-    logger.info(f'λ={lamb}, num_views={config["num_views"]}, proj_dim={config["proj_dim"]}')
+    if is_main:
+        logger.info(f'Starting LeJEPA pretraining for {remaining_steps} steps (from {start_step} to {config["steps"]})')
+        logger.info(f'λ={lamb}, num_views={config["num_views"]}, proj_dim={config["proj_dim"]}')
 
     for step in range(start_step, config['steps']):
         step_start = time()
@@ -362,7 +450,8 @@ def main():
             data_time.update(time() - data_start)
             
             batch_size = views.size(0)
-            total_samples += batch_size
+            # Total samples across all GPUs
+            total_samples += batch_size * world_size
 
             with amp_context:
                 emb, proj = model(views)
@@ -394,10 +483,11 @@ def main():
         sigreg_loss_meter.update(batch_sigreg)
         step_time.update(step_elapsed)
         
-        throughput = batch_size * config['gradient_accumulation_steps'] / step_elapsed
+        # Throughput: samples per second across all GPUs
+        throughput = batch_size * config['gradient_accumulation_steps'] * world_size / step_elapsed
 
-        # Wandb logging (every step or interval)
-        if use_wandb and (step + 1) % wandb_log_interval == 0:
+        # Wandb logging (every step or interval, main process only)
+        if use_wandb and is_main and (step + 1) % wandb_log_interval == 0:
             log_dict = {
                 'train/loss': batch_loss,
                 'train/inv_loss': batch_inv,
@@ -423,8 +513,8 @@ def main():
             
             wandb.log(log_dict, step=step + 1)
 
-        # PCA visualization
-        if use_wandb and (step + 1) % wandb_viz_interval == 0 and last_emb is not None:
+        # PCA visualization (main process only)
+        if use_wandb and is_main and (step + 1) % wandb_viz_interval == 0 and last_emb is not None:
             try:
                 fig = create_pca_plot(last_emb)
                 wandb.log({'embeddings/pca': wandb.Image(fig)}, step=step + 1)
@@ -432,8 +522,8 @@ def main():
             except Exception as e:
                 logger.warning(f'Failed to create PCA plot: {e}')
 
-        # Console logging
-        if (step + 1) % 100 == 0:
+        # Console logging (main process only)
+        if is_main and (step + 1) % 100 == 0:
             gpu_mem = torch.cuda.max_memory_allocated() / 1e9 if using_cuda else 0
             logger.info(
                 f'[{step + 1:06d}] '
@@ -450,30 +540,33 @@ def main():
             inv_loss_meter = AverageMeter()
             sigreg_loss_meter = AverageMeter()
 
-        # Checkpoint
+        # Checkpoint (with barrier to sync all GPUs, only main process saves)
         if (step + 1) % config['checkpoint_interval'] == 0:
-            ckpt_path = path.join(args.out, f'chkpt_{step + 1}.pt')
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'config': config,
-                'step': step + 1,
-                'loss': train_loss.value,
-                'total_samples': total_samples,
-                'seed': args.seed,
-            }, ckpt_path)
-            logger.info(f'Saved {ckpt_path}')
-            
-            if use_wandb:
-                wandb.save(ckpt_path)
+            if distributed:
+                dist.barrier()  # Wait for all ranks before saving
+            if is_main:
+                ckpt_path = path.join(args.out, f'chkpt_{step + 1}.pt')
+                torch.save({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'config': config,
+                    'step': step + 1,
+                    'loss': train_loss.value,
+                    'total_samples': total_samples,
+                    'seed': args.seed,
+                }, ckpt_path)
+                logger.info(f'Saved {ckpt_path}')
+                
+                if use_wandb:
+                    wandb.save(ckpt_path)
 
-        # Best checkpoint (check every 100 steps using smoothed loss)
-        if (step + 1) % 100 == 0:
+        # Best checkpoint (main process only, check every 100 steps using smoothed loss)
+        if is_main and (step + 1) % 100 == 0:
             avg_loss = train_loss.value
             if avg_loss is not None and (best_loss is None or avg_loss < best_loss):
                 best_loss = avg_loss
                 torch.save({
-                    'model': model.state_dict(),
+                    'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'config': config,
                     'step': step + 1,
@@ -483,10 +576,14 @@ def main():
                 }, path.join(args.out, 'best_ckpt.pt'))
                 logger.info(f'[BEST] step {step + 1} | loss={best_loss:.4f}')
 
-    logger.info('Training complete!')
+    if is_main:
+        logger.info('Training complete!')
     
-    if use_wandb:
+    if use_wandb and is_main:
         wandb.finish()
+    
+    # Cleanup distributed
+    cleanup_distributed()
 
 
 if __name__ == '__main__':
