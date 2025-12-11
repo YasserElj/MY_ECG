@@ -41,8 +41,8 @@ noise_std: 0.05
 
 # Training - A100 (80GB) - same as ECG-JEPA effective batch
 steps: 100000
-batch_size: 512
-gradient_accumulation_steps: 4   # Effective batch = 2048
+batch_size: 768
+gradient_accumulation_steps: 1   # Effective batch batch_size * grad_acc
 learning_rate: 0.001
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5000
