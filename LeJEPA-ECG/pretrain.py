@@ -49,6 +49,7 @@ parser.add_argument('--out', default='checkpoints', help='output directory')
 parser.add_argument('--config', default='ViTS_mimic', help='config file name')
 parser.add_argument('--amp', default='bfloat16', choices=['bfloat16', 'float32'])
 parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
+parser.add_argument('--entity', default='AtlasVision_CC', help='wandb team/entity name')
 parser.add_argument('--run-name', default=None, help='wandb run name')
 parser.add_argument('--resume', default=None, help='path to checkpoint to resume from')
 parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
@@ -193,12 +194,13 @@ def main():
     if use_wandb:
         run_name = args.run_name or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         wandb.init(
+            entity=args.entity,
             project=wandb_project,
             name=run_name,
             config={**config, 'seed': args.seed},
             tags=['lejepa', 'ecg', 'pretraining']
         )
-        logger.info(f'Wandb initialized: {wandb_project}/{run_name}')
+        logger.info(f'Wandb initialized: {args.entity}/{wandb_project}/{run_name}')
 
     # Parse data arguments
     dump_files = {}

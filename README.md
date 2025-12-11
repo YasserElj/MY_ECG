@@ -19,10 +19,10 @@ Download from Hugging Face:
 
 ```bash
 # MIMIC-IV-ECG (96GB) - for pretraining
-huggingface-cli download Pryzl/MIMIIC_ECG_npy mimic-ecg.npy --local-dir ./data
+huggingface-cli download Pryzl/MIMIIC_ECG_npy mimic-ecg.npy --local-dir ./dataset
 
 # PTB-XL (2.6GB) - for finetuning
-huggingface-cli download Pryzl/ptb-xl_npy ptb-xl.npy --local-dir ./data
+huggingface-cli download Pryzl/ptb-xl_npy ptb-xl.npy --local-dir ./dataset
 ```
 
 Or download directly:
@@ -36,7 +36,7 @@ Or download directly:
 ```bash
 cd LeJEPA-ECG
 python pretrain.py \
-    --data "mimic-iv-ecg=../data/mimic-ecg.npy" \
+    --data "mimic-iv-ecg=../dataset/mimic-ecg.npy" \
     --out "checkpoints/" \
     --config "ViTS_mimic_a100" \
     --amp "bfloat16" \
@@ -48,7 +48,7 @@ python pretrain.py \
 ```bash
 python finetune.py \
     --checkpoint "checkpoints/best_ckpt.pt" \
-    --data "../data/ptb-xl.npy" \
+    --data "../dataset/ptb-xl.npy" \
     --task "diagnostic" \
     --wandb
 ```

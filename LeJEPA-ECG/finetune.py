@@ -77,6 +77,7 @@ parser.add_argument('--task', choices=TASKS, default='all', help='task type')
 parser.add_argument('--val-fold', choices=FOLDS, type=int, default=9, help='validation fold')
 parser.add_argument('--test-fold', choices=FOLDS, type=int, default=10, help='test fold')
 parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
+parser.add_argument('--entity', default='AtlasVision_CC', help='wandb team/entity name')
 parser.add_argument('--run-name', default=None, help='wandb run name')
 parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
 args = parser.parse_args()
@@ -316,6 +317,7 @@ def main():
     if use_wandb:
         run_name = args.run_name or f'{args.task}_{path.basename(args.encoder).replace(".pt", "")}'
         wandb.init(
+            entity=args.entity,
             project='LeJEPA-ECG-Finetune',
             name=run_name,
             config={
