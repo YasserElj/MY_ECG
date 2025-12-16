@@ -410,7 +410,6 @@ def main():
     train_loss = AverageMeter()
     pred_loss_meter = AverageMeter()
     sigreg_loss_meter = AverageMeter()
-    last_emb = None  # For PCA visualization
 
     remaining_steps = config['steps'] - start_step
     if is_main:
@@ -438,15 +437,17 @@ def main():
             with amp_context:
                 loss, pred_loss, sigreg_loss = model(x, mask_encoder, mask_predictor)
                 loss = loss / config['gradient_accumulation_steps']
-                
-                # Get embeddings for visualization (no extra forward pass)
-                with torch.no_grad():
-                    last_emb = model_without_ddp.get_embeddings(x)
             
             loss.backward()
             batch_loss += loss.item()
             batch_pred += pred_loss.item() / config['gradient_accumulation_steps']
             batch_sigreg += sigreg_loss.item() / config['gradient_accumulation_steps']
+        
+        # Get embeddings for visualization ONLY when needed (not every step!)
+        need_embeddings = use_wandb and is_main and (step + 1) % wandb_viz_interval == 0
+        if need_embeddings:
+            with torch.no_grad():
+                last_emb = model_without_ddp.get_embeddings(x)
 
         # Get gradient norm before clipping
         grad_norm = get_gradient_norm(model)
@@ -480,22 +481,20 @@ def main():
                 'gradients/norm': grad_norm,
                 'system/gpu_memory_gb': get_gpu_memory_gb(),
             }
-            
-            # Embedding statistics
-            if last_emb is not None:
+            wandb.log(log_dict, step=step + 1)
+        
+        # PCA visualization + embedding stats (main process only, every wandb_viz_interval steps)
+        if need_embeddings and last_emb is not None:
+            try:
+                import matplotlib.pyplot as plt
+                # Log embedding statistics
                 emb_flat = last_emb.reshape(-1, last_emb.size(-1))
-                log_dict.update({
+                wandb.log({
                     'embeddings/mean': emb_flat.mean().item(),
                     'embeddings/std': emb_flat.std().item(),
                     'embeddings/norm': emb_flat.norm(dim=-1).mean().item(),
-                })
-            
-            wandb.log(log_dict, step=step + 1)
-        
-        # PCA visualization (main process only)
-        if use_wandb and is_main and (step + 1) % wandb_viz_interval == 0 and last_emb is not None:
-            try:
-                import matplotlib.pyplot as plt
+                }, step=step + 1)
+                # PCA plot
                 fig = create_pca_plot(last_emb)
                 wandb.log({'embeddings/pca': wandb.Image(fig)}, step=step + 1)
                 plt.close(fig)
