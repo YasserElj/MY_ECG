@@ -1,32 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=myjepa-pretrain
-#SBATCH --output=outputs/pretrain_%j.log
-#SBATCH --error=errors/pretrain_%j.err
-#SBATCH --time=48:00:00
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+# MyJEPA Pretraining with 1x GPU
+# Usage: ./batch/pretrain.sh
 
-# Environment setup
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+mkdir -p outputs checkpoints
 
-# Change to project directory
-cd $SLURM_SUBMIT_DIR
+# Activate conda
+eval "$(conda shell.bash hook)"
+conda activate jepa-ecg
 
-# Create output directories
-mkdir -p outputs errors checkpoints
-
-# Run pretraining
-python pretrain.py \
-    --data "mimic-iv-ecg=../dataset/Mimic-IV-All/mimic-ecg-mini.npy" \
+# Run with nohup (survives disconnect)
+nohup python pretrain.py \
+    --data "mimic-iv-ecg=../dataset/Mimic-IV-All/mimic-ecg.npy" \
     --out "checkpoints/" \
     --config "ViTS_mimic" \
     --amp "bfloat16" \
     --wandb \
     --entity "AtlasVision_CC" \
     --run-name "MyJEPA_pretrain" \
-    --seed 42
+    --seed 42 \
+    > outputs/pretrain.log 2>&1 &
 
-echo "Pretraining completed!"
+echo "Training started! PID: $!"
+echo "Monitor: tail -f outputs/pretrain.log"
 
