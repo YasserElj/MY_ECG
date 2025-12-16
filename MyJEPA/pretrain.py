@@ -108,20 +108,36 @@ def load_config(config_name):
         return yaml.safe_load(f)
 
 
-def get_gpu_stats():
-    """Get GPU memory stats."""
+def get_gpu_memory_gb():
+    """Get peak GPU memory in GB."""
     if not torch.cuda.is_available():
-        return {}
+        return 0.0
+    return torch.cuda.max_memory_allocated() / 1e9
+
+
+def create_pca_plot(embeddings, n_samples=2000):
+    """Create PCA visualization of embeddings."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
     
-    allocated = torch.cuda.memory_allocated() / 1e9
-    reserved = torch.cuda.memory_reserved() / 1e9
-    peak = torch.cuda.max_memory_allocated() / 1e9
+    emb = embeddings.detach().cpu().numpy()
+    if len(emb) > n_samples:
+        idx = np.random.choice(len(emb), n_samples, replace=False)
+        emb = emb[idx]
     
-    return {
-        'system/gpu_memory_allocated_gb': allocated,
-        'system/gpu_memory_reserved_gb': reserved,
-        'system/gpu_peak_memory_gb': peak,
-    }
+    pca = PCA(n_components=2)
+    emb_2d = pca.fit_transform(emb)
+    
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
+    ax.scatter(emb_2d[:, 0], emb_2d[:, 1], alpha=0.5, s=10, c='steelblue')
+    ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+    ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+    ax.set_title(f'Embedding PCA (n={len(emb)})')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
 
 
 def get_gradient_norm(model):
@@ -389,6 +405,7 @@ def main():
     train_loss = AverageMeter()
     pred_loss_meter = AverageMeter()
     sigreg_loss_meter = AverageMeter()
+    last_emb = None  # For PCA visualization
 
     remaining_steps = config['steps'] - start_step
     if is_main:
@@ -416,6 +433,10 @@ def main():
             with amp_context:
                 loss, pred_loss, sigreg_loss = model(x, mask_encoder, mask_predictor)
                 loss = loss / config['gradient_accumulation_steps']
+                
+                # Get embeddings for visualization (no extra forward pass)
+                with torch.no_grad():
+                    last_emb = model_without_ddp.get_embeddings(x)
             
             loss.backward()
             batch_loss += loss.item()
@@ -452,9 +473,29 @@ def main():
                 'train/throughput': throughput,
                 'train/total_samples': total_samples,
                 'gradients/norm': grad_norm,
+                'system/gpu_memory_gb': get_gpu_memory_gb(),
             }
-            log_dict.update(get_gpu_stats())
+            
+            # Embedding statistics
+            if last_emb is not None:
+                emb_flat = last_emb.reshape(-1, last_emb.size(-1))
+                log_dict.update({
+                    'embeddings/mean': emb_flat.mean().item(),
+                    'embeddings/std': emb_flat.std().item(),
+                    'embeddings/norm': emb_flat.norm(dim=-1).mean().item(),
+                })
+            
             wandb.log(log_dict, step=step + 1)
+        
+        # PCA visualization (main process only)
+        if use_wandb and is_main and (step + 1) % wandb_viz_interval == 0 and last_emb is not None:
+            try:
+                import matplotlib.pyplot as plt
+                fig = create_pca_plot(last_emb)
+                wandb.log({'embeddings/pca': wandb.Image(fig)}, step=step + 1)
+                plt.close(fig)
+            except Exception as e:
+                logger.warning(f'Failed to create PCA plot: {e}')
 
         # Console logging
         if is_main and (step + 1) % 100 == 0:
