@@ -42,8 +42,9 @@ sigreg_lambda: 0.02
 
 # Training
 steps: 100_000
-batch_size: 256
-gradient_accumulation_steps: 4
+batch_size: 512                    # Increased from 256 (only using ~12GB/48GB)
+gradient_accumulation_steps: 2     # Reduced from 4 (faster iterations)
+# Effective batch: 512 × 2 GPUs × 2 acc = 2048
 learning_rate: 1.0e-3
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 5_000

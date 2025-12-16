@@ -20,6 +20,10 @@ import numpy as np
 import torch
 import yaml
 from sklearn.metrics import roc_auc_score
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
@@ -114,6 +118,138 @@ def get_gpu_stats():
     return {
         'system/gpu_memory_gb': torch.cuda.max_memory_allocated() / 1e9,
     }
+
+
+def create_embedding_plot(
+    model, 
+    dataloader, 
+    device, 
+    class_names, 
+    title="Embeddings",
+    num_samples=1000, 
+    perplexity=30,
+    single_label=False
+):
+    """
+    Create t-SNE embedding plot colored by class labels.
+    
+    Args:
+        model: ViTClassifier model
+        dataloader: DataLoader with (x, y) batches
+        device: torch device
+        class_names: list of class names
+        title: plot title
+        num_samples: max samples to visualize
+        perplexity: t-SNE perplexity
+        single_label: if True, use argmax for labels; else use first positive class
+    
+    Returns:
+        matplotlib figure
+    """
+    model.eval()
+    embeddings = []
+    labels = []
+    
+    with torch.inference_mode():
+        for x_batch, y_batch in dataloader:
+            if len(embeddings) * x_batch.shape[0] >= num_samples:
+                break
+            x_batch = x_batch.to(device)
+            
+            # Handle cropped inputs (B, num_crops, C, L) -> (B*num_crops, C, L)
+            if x_batch.dim() == 4:
+                batch_size, num_crops = x_batch.shape[:2]
+                x_batch = x_batch.reshape(-1, x_batch.shape[2], x_batch.shape[3])
+                # Get encoder embeddings (before classifier head)
+                emb = model.encoder(x_batch)  # (B*num_crops, N, dim)
+                emb = emb.mean(dim=1)  # Global average pool -> (B*num_crops, dim)
+                # Average across crops
+                emb = emb.reshape(batch_size, num_crops, -1).mean(dim=1)  # (B, dim)
+            else:
+                # Get encoder embeddings (before classifier head)
+                emb = model.encoder(x_batch)  # (B, N, dim)
+                emb = emb.mean(dim=1)  # Global average pool -> (B, dim)
+            
+            embeddings.append(emb.cpu())
+            labels.append(y_batch.cpu())
+    
+    embeddings = torch.cat(embeddings)[:num_samples].numpy()
+    labels_tensor = torch.cat(labels)[:num_samples]
+    
+    # Convert multi-label to single label for coloring
+    if single_label:
+        # Single-label: use argmax
+        label_indices = labels_tensor.argmax(dim=1).numpy()
+    else:
+        # Multi-label: use first positive class (or -1 if none)
+        label_indices = []
+        for row in labels_tensor:
+            positive_indices = torch.where(row > 0.5)[0]
+            if len(positive_indices) > 0:
+                label_indices.append(positive_indices[0].item())
+            else:
+                label_indices.append(-1)
+        label_indices = np.array(label_indices)
+    
+    # t-SNE projection
+    tsne = TSNE(n_components=2, perplexity=min(perplexity, len(embeddings) - 1), 
+                random_state=42, n_iter=1000)
+    emb_2d = tsne.fit_transform(embeddings)
+    
+    # Create plot with nice styling
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    # Get unique labels and create colormap
+    unique_labels = np.unique(label_indices)
+    num_classes = len(unique_labels)
+    
+    # Use a good colormap
+    if num_classes <= 10:
+        cmap = plt.cm.tab10
+    elif num_classes <= 20:
+        cmap = plt.cm.tab20
+    else:
+        cmap = plt.cm.viridis
+    
+    # Plot each class
+    for i, label_idx in enumerate(unique_labels):
+        mask = label_indices == label_idx
+        if label_idx == -1:
+            name = "Unknown"
+            color = 'gray'
+        else:
+            name = class_names[label_idx] if label_idx < len(class_names) else f"Class {label_idx}"
+            color = cmap(i / max(num_classes - 1, 1))
+        
+        ax.scatter(
+            emb_2d[mask, 0], 
+            emb_2d[mask, 1], 
+            c=[color], 
+            label=f"{name} ({mask.sum()})",
+            alpha=0.6, 
+            s=15,
+            edgecolors='none'
+        )
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('t-SNE 1', fontsize=11)
+    ax.set_ylabel('t-SNE 2', fontsize=11)
+    
+    # Legend outside plot
+    ax.legend(
+        loc='center left', 
+        bbox_to_anchor=(1.02, 0.5),
+        fontsize=9,
+        framealpha=0.9
+    )
+    
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+    
+    plt.tight_layout()
+    
+    model.train()
+    return fig
 
 
 def main():
@@ -335,6 +471,24 @@ def main():
             }
         )
         wandb.watch(model, log='gradients', log_freq=100)
+        
+        # Log pretrained embeddings visualization
+        logger.info('creating pretrained embedding visualization...')
+        try:
+            pretrained_fig = create_embedding_plot(
+                model=model,
+                dataloader=val_loader,
+                device=device,
+                class_names=class_names,
+                title=f'{args.task.upper()} - Pretrained Embeddings (t-SNE)',
+                num_samples=min(1000, val_mask.sum()),
+                single_label=single_label
+            )
+            wandb.log({'embeddings/pretrained': wandb.Image(pretrained_fig)}, step=0)
+            plt.close(pretrained_fig)
+            logger.info('pretrained embedding plot logged to wandb')
+        except Exception as e:
+            logger.warning(f'failed to create pretrained embedding plot: {e}')
 
     # Training
     step_time = AverageMeter()
@@ -496,6 +650,25 @@ def main():
         except:
             pass
         wandb.log(log_dict)
+        
+        # Log finetuned embeddings visualization
+        logger.info('creating finetuned embedding visualization...')
+        try:
+            finetuned_fig = create_embedding_plot(
+                model=model,
+                dataloader=val_loader,
+                device=device,
+                class_names=class_names,
+                title=f'{args.task.upper()} - Finetuned Embeddings (t-SNE)',
+                num_samples=min(1000, val_mask.sum()),
+                single_label=single_label
+            )
+            wandb.log({'embeddings/finetuned': wandb.Image(finetuned_fig)})
+            plt.close(finetuned_fig)
+            logger.info('finetuned embedding plot logged to wandb')
+        except Exception as e:
+            logger.warning(f'failed to create finetuned embedding plot: {e}')
+        
         wandb.finish()
 
     # Save predictions
