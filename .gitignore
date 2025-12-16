@@ -2,7 +2,7 @@ dataset/
 *.zip
 *.pt
 *.npz
-__pycache__
-wandb/
-*/outputs/
-*/errors/
+**/__pycache__/
+**/wandb/
+**/outputs/
+**/errors/
