@@ -52,6 +52,9 @@ weight_decay: 1.0e-2
 gradient_clip: 1.0
 checkpoint_interval: 5_000
 
+# DataLoader
+num_workers: 16  # Increase for faster data loading on multi-core CPUs
+
 # Wandb
 wandb_project: 'MyJEPA-ECG'
 wandb_log_interval: 10

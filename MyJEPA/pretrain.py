@@ -293,15 +293,20 @@ def main():
         max_keep_ratio=config['max_keep_ratio']
     )
 
-    # Create dataloader
+    # Create dataloader with optimized settings for multi-core CPUs
     train_dataset = DatasetRouter(datasets.values())
+    dataloader_workers = config.get('num_workers', min(16, num_cpus))
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=config['batch_size'],
         pin_memory=using_cuda,
         collate_fn=collate_fn,
-        num_workers=2
+        num_workers=dataloader_workers,
+        prefetch_factor=4 if dataloader_workers > 0 else None,
+        persistent_workers=True if dataloader_workers > 0 else False,
     )
+    if is_main:
+        logger.info(f'DataLoader: {dataloader_workers} workers, prefetch_factor=4')
 
     def map_to_device(iterator):
         for batch in iterator:

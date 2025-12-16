@@ -51,6 +51,9 @@ weight_decay: 1.0e-2
 gradient_clip: 1.0
 checkpoint_interval: 5_000
 
+# DataLoader
+num_workers: 8  # Adjust based on CPU cores
+
 # Wandb
 wandb_project: 'MyJEPA-ECG'
 wandb_log_interval: 10
