@@ -12,7 +12,10 @@ Architecture:
 3. Projector: MLP that projects embeddings for SIGReg
 4. SIGReg: Regularizes embeddings to follow isotropic Gaussian distribution
 
-Loss = pred_loss + λ * sigreg_loss
+Loss = pred_loss + λ_raw * sigreg_raw + λ_proj * sigreg_proj + λ_var * variance_loss
+
+Key fix: Apply SIGReg directly to encoder outputs (not just projected), 
+plus explicit variance constraint to prevent collapse.
 """
 
 from collections import OrderedDict
@@ -90,6 +93,8 @@ class MyJEPA(nn.Module):
     
     Combines ECG-JEPA's masking + prediction with LeJEPA's single-encoder + SIGReg.
     No EMA, no stop-gradient - SIGReg prevents collapse.
+    
+    Key improvement: Apply SIGReg directly to encoder outputs (can't be fooled by projector).
     """
     
     def __init__(
@@ -118,12 +123,18 @@ class MyJEPA(nn.Module):
         proj_dim: int = 128,
         num_slices: int = 1024,
         sigreg_lambda: float = 0.02,
+        sigreg_raw_lambda: float = 0.1,  # NEW: SIGReg on raw encoder outputs
+        variance_lambda: float = 0.1,     # NEW: Explicit variance constraint
+        variance_target: float = 1.0,     # NEW: Target std for variance constraint
         # Other
         use_sdp_kernel: bool = True
     ):
         super().__init__()
         self.dim = dim
         self.sigreg_lambda = sigreg_lambda
+        self.sigreg_raw_lambda = sigreg_raw_lambda
+        self.variance_lambda = variance_lambda
+        self.variance_target = variance_target
         
         num_patches = channel_size // patch_size
         
@@ -170,6 +181,9 @@ class MyJEPA(nn.Module):
             out_dim=proj_dim
         )
         self.sigreg = SIGReg(num_slices=num_slices)
+        
+        # NEW: SIGReg directly on raw encoder outputs (can't be fooled by projector)
+        self.sigreg_raw = SIGReg(num_slices=num_slices)
     
     def forward(self, x, mask_encoder, mask_predictor):
         """
@@ -181,9 +195,9 @@ class MyJEPA(nn.Module):
             mask_predictor: Target patch indices to predict, shape (B, K_tgt)
         
         Returns:
-            total_loss: Combined prediction + SIGReg loss
+            total_loss: Combined prediction + regularization losses
             pred_loss: Prediction loss (smooth L1)
-            sigreg_loss: SIGReg regularization loss
+            reg_loss: Combined regularization loss (for logging)
         """
         # Context encoding (only visible patches)
         z_ctx = self.encoder(x, mask_encoder)  # (B, K_ctx, dim)
@@ -200,15 +214,32 @@ class MyJEPA(nn.Module):
         # Prediction loss (smooth L1, same as ECG-JEPA uses L1)
         pred_loss = F.smooth_l1_loss(z_pred, z_tgt)
         
-        # SIGReg on global representation (mean pooled full encoding)
+        # Global representation (mean pooled full encoding)
         z_global = z_full.mean(dim=1)  # (B, dim)
+        
+        # === REGULARIZATION LOSSES ===
+        
+        # 1. SIGReg on PROJECTED embeddings (original, can be fooled by BatchNorm)
         z_proj = self.projector(z_global)  # (B, proj_dim)
-        sigreg_loss = self.sigreg(z_proj)
+        sigreg_proj_loss = self.sigreg(z_proj)
         
-        # Combined loss
-        total_loss = pred_loss + self.sigreg_lambda * sigreg_loss
+        # 2. SIGReg on RAW encoder outputs (NEW - can't be fooled!)
+        sigreg_raw_loss = self.sigreg_raw(z_global)
         
-        return total_loss, pred_loss, sigreg_loss
+        # 3. Explicit variance constraint (NEW - prevents shrinking)
+        # Force each dimension to have std >= variance_target
+        z_std = z_global.std(dim=0)  # (dim,) - std per feature dimension
+        variance_loss = torch.relu(self.variance_target - z_std).mean()
+        
+        # Combined regularization loss (for logging)
+        reg_loss = (self.sigreg_lambda * sigreg_proj_loss + 
+                    self.sigreg_raw_lambda * sigreg_raw_loss +
+                    self.variance_lambda * variance_loss)
+        
+        # Total loss
+        total_loss = pred_loss + reg_loss
+        
+        return total_loss, pred_loss, reg_loss
     
     def get_embeddings(self, x):
         """

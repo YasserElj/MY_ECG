@@ -344,6 +344,9 @@ def main():
         proj_dim=config['proj_dim'],
         num_slices=config['num_slices'],
         sigreg_lambda=config['sigreg_lambda'],
+        sigreg_raw_lambda=config.get('sigreg_raw_lambda', 0.1),      # NEW
+        variance_lambda=config.get('variance_lambda', 0.1),          # NEW
+        variance_target=config.get('variance_target', 1.0),          # NEW
         use_sdp_kernel=using_cuda
     ).to(device)
     
@@ -409,12 +412,13 @@ def main():
     step_time = AverageMeter()
     train_loss = AverageMeter()
     pred_loss_meter = AverageMeter()
-    sigreg_loss_meter = AverageMeter()
+    reg_loss_meter = AverageMeter()
 
     remaining_steps = config['steps'] - start_step
     if is_main:
         logger.info(f'Starting MyJEPA pretraining for {remaining_steps} steps (from {start_step} to {config["steps"]})')
-        logger.info(f'λ_sigreg={config["sigreg_lambda"]}, pred_dim={config["pred_dim"]}')
+        logger.info(f'λ_sigreg_proj={config["sigreg_lambda"]}, λ_sigreg_raw={config.get("sigreg_raw_lambda", 0.1)}, '
+                    f'λ_var={config.get("variance_lambda", 0.1)}, var_target={config.get("variance_target", 1.0)}')
 
     for step in range(start_step, config['steps']):
         step_start = time()
@@ -426,7 +430,7 @@ def main():
         # Forward pass with gradient accumulation
         batch_loss = 0.
         batch_pred = 0.
-        batch_sigreg = 0.
+        batch_reg = 0.
 
         for _ in range(config['gradient_accumulation_steps']):
             x, mask_encoder, mask_predictor = next(train_iterator)
@@ -435,13 +439,13 @@ def main():
             total_samples += batch_size * world_size
 
             with amp_context:
-                loss, pred_loss, sigreg_loss = model(x, mask_encoder, mask_predictor)
+                loss, pred_loss, reg_loss = model(x, mask_encoder, mask_predictor)
                 loss = loss / config['gradient_accumulation_steps']
             
             loss.backward()
             batch_loss += loss.item()
             batch_pred += pred_loss.item() / config['gradient_accumulation_steps']
-            batch_sigreg += sigreg_loss.item() / config['gradient_accumulation_steps']
+            batch_reg += reg_loss.item() / config['gradient_accumulation_steps']
         
         # Get embeddings for visualization ONLY when needed (not every step!)
         need_embeddings = use_wandb and is_main and (step + 1) % wandb_viz_interval == 0
@@ -463,7 +467,7 @@ def main():
         step_elapsed = time() - step_start
         train_loss.update(batch_loss)
         pred_loss_meter.update(batch_pred)
-        sigreg_loss_meter.update(batch_sigreg)
+        reg_loss_meter.update(batch_reg)
         step_time.update(step_elapsed)
         
         throughput = batch_size * config['gradient_accumulation_steps'] * world_size / step_elapsed
@@ -473,7 +477,7 @@ def main():
             log_dict = {
                 'train/loss': batch_loss,
                 'train/pred_loss': batch_pred,
-                'train/sigreg_loss': batch_sigreg,
+                'train/reg_loss': batch_reg,
                 'train/lr': lr,
                 'train/step_time': step_elapsed,
                 'train/throughput': throughput,
@@ -510,7 +514,7 @@ def main():
                 f'time={step_time.value:.3f}s '
                 f'loss={train_loss.value:.4f} '
                 f'pred={pred_loss_meter.value:.4f} '
-                f'sigreg={sigreg_loss_meter.value:.2f} '
+                f'reg={reg_loss_meter.value:.2f} '
                 f'keep={keep_ratio:.2f} '
                 f'lr={lr:.2e} '
                 f'gpu={gpu_mem:.1f}GB'
@@ -518,7 +522,7 @@ def main():
             step_time = AverageMeter()
             train_loss = AverageMeter()
             pred_loss_meter = AverageMeter()
-            sigreg_loss_meter = AverageMeter()
+            reg_loss_meter = AverageMeter()
 
         # Checkpoint
         if (step + 1) % config['checkpoint_interval'] == 0:

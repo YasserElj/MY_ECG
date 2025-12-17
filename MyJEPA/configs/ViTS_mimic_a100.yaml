@@ -38,7 +38,10 @@ pred_num_heads: 6
 proj_hidden_dim: 2048
 proj_dim: 128
 num_slices: 1024
-sigreg_lambda: 0.02
+sigreg_lambda: 0.02          # SIGReg on projected embeddings (original)
+sigreg_raw_lambda: 0.1       # SIGReg on raw encoder outputs (NEW - can't be fooled)
+variance_lambda: 0.1         # Explicit variance constraint (NEW - prevents shrinking)
+variance_target: 1.0         # Target std for variance constraint
 
 # Training (optimized for A100)
 steps: 100_000
