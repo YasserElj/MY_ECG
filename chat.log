@@ -1,0 +1,335 @@
+# ECG Self-Supervised Learning Project - Development Log
+
+## Project Goal
+Develop a self-supervised learning (SSL) model for ECG data that surpasses or matches ECG-JEPA's performance while maintaining a simpler architecture.
+
+---
+
+## Phase 1: Understanding ECG-JEPA (Baseline)
+
+### What is ECG-JEPA?
+ECG-JEPA is a masking-based SSL method for ECG signals. It uses:
+- **Two encoders**: Context encoder + Target encoder (with EMA updates)
+- **Masking strategy**: Block masking where 15-25% of patches are visible (context), 75-85% are masked (targets)
+- **Predictor network**: Small transformer that predicts target patch embeddings from context
+- **Loss**: L1/Smooth L1 between predicted and actual target embeddings
+- **Collapse prevention**: EMA (Exponential Moving Average) on target encoder
+
+### ECG-JEPA Results (Benchmark)
+- **Rhythm classification AUC: 0.96** on PTB-XL
+- This is our target to beat or match
+
+---
+
+## Phase 2: LeJEPA-ECG Implementation
+
+### Why LeJEPA?
+LeJEPA (from computer vision) uses a different paradigm:
+- **Single encoder** (no EMA complexity)
+- **Augmentation invariance**: Instead of masking, it creates multiple augmented views
+- **SIGReg regularization**: Forces embeddings to follow isotropic Gaussian distribution to prevent collapse
+
+### Hypothesis
+We hypothesized that LeJEPA's simpler single-encoder architecture with SIGReg could work for ECG data, avoiding the complexity of EMA.
+
+### Implementation Details
+
+#### Files Created
+- `LeJEPA-ECG/models/lejepa.py` - Main model with SIGReg
+- `LeJEPA-ECG/models/vit.py` - Vision Transformer encoder
+- `LeJEPA-ECG/models/modules.py` - Building blocks (Block, MLP, Projector)
+- `LeJEPA-ECG/data/transforms.py` - ECG augmentations (scaling, noise, masking)
+- `LeJEPA-ECG/pretrain.py` - Pretraining script with DDP and Wandb
+- `LeJEPA-ECG/finetune.py` - Linear probing evaluation
+
+#### Key Components
+1. **SIGReg (Sketched Isotropic Gaussian Regularization)**
+   - Compares empirical characteristic function of embeddings to standard Gaussian
+   - Uses random projections (num_slices=1024) for efficiency
+   - Forces diversity in learned representations
+
+2. **Augmentations for ECG**
+   - Random amplitude scaling
+   - Gaussian noise injection
+   - Random channel dropout
+   - Temporal masking
+
+3. **Training Setup**
+   - Multi-GPU support via DDP (DistributedDataParallel)
+   - Wandb logging with embedding visualizations
+   - Configurable via YAML files
+
+### Infrastructure Improvements Made
+1. **Reproducibility**: Added `--seed` argument and `set_seed()` function
+2. **DDP Support**: Proper distributed training with gradient sync
+3. **Wandb Integration**: Team entity support (`--entity AtlasVision_CC`)
+4. **Throughput Calculation**: Fixed to account for gradient accumulation and world size
+5. **Data Loading**: Optimized with `num_workers`, `prefetch_factor`, `persistent_workers`
+
+### LeJEPA-ECG Results
+
+#### Pretraining
+- Trained for 100k steps on MIMIC-IV-ECG
+- Used 2x RTX 6000 Ada GPUs (batch_size=440, acc=4)
+- Also trained on single A100 80GB (batch_size=768, acc=2)
+
+#### Finetuning Results
+- **Rhythm classification AUC: ~0.59** (random baseline ~0.5)
+- This is significantly worse than ECG-JEPA's 0.96
+
+### Why LeJEPA Failed for ECG
+
+**Root Cause Analysis:**
+1. **Augmentation-invariance doesn't fit ECG**: LeJEPA forces the model to produce similar embeddings for different augmented views. But for ECG:
+   - Temporal structure is critical (arrhythmias are defined by timing)
+   - Augmentations that preserve class labels might destroy temporal patterns
+   - The model learns to ignore temporal information to be "invariant"
+
+2. **No temporal prediction task**: Unlike masking-based methods, LeJEPA doesn't require the model to understand temporal relationships - it just needs views to match.
+
+3. **SIGReg alone isn't enough**: While SIGReg prevents complete collapse, the representations learned are not semantically meaningful for ECG.
+
+---
+
+## Phase 3: MyJEPA - Hybrid Approach
+
+### Design Philosophy
+Combine the best of both worlds:
+- **From ECG-JEPA**: Masking + prediction task (forces temporal understanding)
+- **From LeJEPA**: Single encoder + SIGReg (simpler than EMA)
+
+### MyJEPA Architecture
+
+```
+Input ECG (B, 12, 5000)
+       │
+       ▼
+   MaskCollator
+       │
+       ├──► Context indices (15-25% visible)
+       │
+       ▼
+   Single Encoder (shared weights)
+       │
+       ├──► encode(x, context_mask) → z_ctx
+       │
+       └──► encode(x, full) → z_full
+                   │
+                   ├──► extract targets → z_tgt
+                   │
+                   └──► mean pool → z_global
+                              │
+                              ▼
+                         Projector → z_proj
+                              │
+                              ▼
+                           SIGReg
+       
+   Predictor(z_ctx) → z_pred
+       
+   Loss = pred_loss(z_pred, z_tgt) + λ * sigreg_loss(z_proj)
+```
+
+### Key Differences from ECG-JEPA
+
+| Aspect | ECG-JEPA | MyJEPA |
+|--------|----------|--------|
+| Encoders | 2 (context + target with EMA) | 1 (single encoder) |
+| Collapse prevention | EMA momentum | SIGReg regularization |
+| Target gradient | stop_gradient | Normal gradient flow |
+| Complexity | Higher (EMA params) | Lower |
+
+### Implementation Files
+
+#### Core Model
+- `MyJEPA/models/myjepa.py` - Main model class with:
+  - VisionTransformer encoder
+  - Predictor network (from ECG-JEPA)
+  - Projector + SIGReg (from LeJEPA)
+
+#### Copied/Adapted
+- `MyJEPA/models/vit.py` - From LeJEPA-ECG
+- `MyJEPA/models/predictor.py` - From ECG-JEPA
+- `MyJEPA/models/modules.py` - Combined from both
+- `MyJEPA/data/masks.py` - MaskCollator from ECG-JEPA
+
+### Initial MyJEPA Results
+
+#### Pretraining Observations
+- Trained for ~50k+ steps
+- `embeddings/std` dropped from ~1.0 to ~0.7 during training
+- PCA plots showed some clustering but not as clear as expected
+
+#### Finetuning Results
+- **Rhythm classification AUC: 0.59** (same as LeJEPA!)
+- This indicated the model was still experiencing some form of collapse
+
+### Diagnosis: Why 0.59 AUC?
+
+**The Problem:**
+Without asymmetry (stop-gradient or EMA), the model can minimize prediction loss by:
+1. Mapping all embeddings to similar values (collapse)
+2. The prediction becomes trivial: "everything predicts to the same thing"
+
+**SIGReg's Limitation:**
+- SIGReg is applied to projected embeddings (after the Projector network)
+- The Projector can learn to "spread" collapsed encoder outputs artificially
+- The raw encoder embeddings may still collapse!
+
+---
+
+## Phase 4: Fixing MyJEPA - Enhanced Regularization
+
+### Latest Changes (Current Session)
+
+#### Problem Identified
+SIGReg on projected embeddings can be "fooled" by the projector - it can take collapsed encoder outputs and spread them to look Gaussian.
+
+#### Solution Implemented
+Three-pronged regularization approach:
+
+1. **SIGReg on Raw Encoder Outputs** (`sigreg_raw_lambda=0.1`)
+   - Applied directly to `z_global` (mean-pooled encoder output)
+   - Cannot be fooled by the projector
+   - Forces encoder itself to produce diverse embeddings
+
+2. **SIGReg on Projected Embeddings** (`sigreg_lambda=0.02`)
+   - Keep original regularization as secondary signal
+
+3. **Explicit Variance Constraint** (`variance_lambda=0.1`, `variance_target=1.0`)
+   - Penalizes when std(embeddings) < 1.0
+   - Directly prevents embedding shrinking
+   - Loss = max(0, target - std)
+
+#### New Loss Function
+```
+total_loss = pred_loss + reg_loss
+
+reg_loss = λ_proj * SIGReg(projected_embeddings)
+         + λ_raw  * SIGReg(raw_encoder_embeddings)  
+         + λ_var  * max(0, 1.0 - std(embeddings))
+```
+
+#### Files Modified
+- `MyJEPA/models/myjepa.py` - Added `sigreg_raw`, variance constraint
+- `MyJEPA/configs/ViTS_mimic.yaml` - Added new hyperparameters
+- `MyJEPA/configs/ViTS_mimic_a100.yaml` - Added new hyperparameters
+- `MyJEPA/pretrain.py` - Updated logging to show `reg_loss`
+
+### Expected Outcome
+- `embeddings/std` should stay ≥1.0 throughout training
+- Better separation in embedding space
+- Target: **AUC 0.92-0.95** on rhythm classification
+
+---
+
+## Technical Details
+
+### Hardware Configurations Used
+
+#### 2x RTX 6000 Ada Setup
+```yaml
+batch_size: 512
+gradient_accumulation_steps: 2
+# Effective batch: 512 × 2 GPUs × 2 acc = 2048
+```
+
+#### Single A100 80GB Setup
+```yaml
+batch_size: 768
+gradient_accumulation_steps: 2
+# Effective batch: 768 × 2 = 1536
+```
+
+### Wandb Integration
+- Project: `MyJEPA-ECG` (and `LeJEPA-ECG`)
+- Team: `AtlasVision_CC`
+- Logged metrics: loss, pred_loss, reg_loss, lr, throughput, embeddings stats, PCA plots
+
+### DDP Training
+- Uses `torchrun` for launching
+- Only main process (rank 0) logs to Wandb
+- Gradients synchronized across GPUs
+
+### Data Loading Optimization
+- Initial loading is slow (full dataset into RAM)
+- Considered preprocessing script but deemed unnecessary
+- Used `num_workers=16`, `prefetch_factor=2` for faster iteration
+
+---
+
+## Key Learnings
+
+1. **SSL paradigm matters for the domain**
+   - Augmentation-invariance (contrastive, VICReg-style) doesn't work well for temporal data like ECG
+   - Masking-prediction tasks force learning of temporal structure
+
+2. **Asymmetry is crucial in prediction tasks**
+   - Without stop-gradient or EMA, prediction tasks can collapse
+   - Need explicit regularization to maintain embedding diversity
+
+3. **Regularization placement matters**
+   - Applying regularization after projector can be fooled
+   - Must regularize the encoder outputs directly
+
+4. **Embedding monitoring is essential**
+   - Track `embeddings/std` during training
+   - PCA/t-SNE visualizations help diagnose collapse early
+
+---
+
+## Next Steps
+
+1. **Train with enhanced regularization** - Monitor if std stays ≥1.0
+2. **Hyperparameter tuning** - Adjust λ values if needed
+3. **Evaluate on PTB-XL** - Compare AUC with ECG-JEPA baseline
+4. **Consider stop-gradient** - If regularization alone isn't enough, add SimSiam-style stop-gradient
+
+---
+
+## File Structure Reference
+
+```
+MY_ECG/
+├── ECG-JEPA/          # Original ECG-JEPA (reference)
+├── LeJEPA-ECG/        # Failed attempt with augmentation-invariance
+│   ├── models/
+│   ├── data/
+│   ├── configs/
+│   ├── batch/
+│   ├── pretrain.py
+│   └── finetune.py
+├── MyJEPA/            # Current approach (masking + single encoder + SIGReg)
+│   ├── models/
+│   │   ├── myjepa.py      # Main model with enhanced regularization
+│   │   ├── vit.py
+│   │   ├── predictor.py
+│   │   └── modules.py
+│   ├── data/
+│   │   ├── masks.py       # Block masking from ECG-JEPA
+│   │   └── ...
+│   ├── configs/
+│   │   ├── ViTS_mimic.yaml
+│   │   └── ViTS_mimic_a100.yaml
+│   ├── batch/
+│   ├── pretrain.py
+│   └── finetune.py
+└── dataset/           # MIMIC-IV-ECG, PTB-XL
+```
+
+---
+
+## Results Summary Table
+
+| Method | Architecture | AUC (Rhythm) | Notes |
+|--------|-------------|--------------|-------|
+| ECG-JEPA | 2 encoders + EMA | **0.96** | Baseline to beat |
+| LeJEPA-ECG | 1 encoder + augmentation + SIGReg | 0.59 | Augmentation-invariance failed |
+| MyJEPA v1 | 1 encoder + masking + SIGReg(proj) | 0.59 | Collapse despite SIGReg |
+| MyJEPA v2 | 1 encoder + masking + SIGReg(raw) + variance | TBD | Enhanced regularization |
+
+---
+
+*Log created: December 17, 2025*
+*Last updated: December 17, 2025*
+
