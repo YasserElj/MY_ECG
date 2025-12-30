@@ -330,6 +330,227 @@ MY_ECG/
 
 ---
 
+## Phase 5: NEPA-ECG Implementation
+
+### Why NEPA?
+
+After MyJEPA's struggles with collapse, we explored **NEPA (Next-Embedding Predictive Autoregression)** - a simpler SSL method from the NEPA paper. Key advantages:
+
+- **No masking**: Unlike JEPA, no complex mask sampling needed
+- **No predictor network**: Simpler architecture
+- **No EMA**: Uses stop-gradient instead (like SimSiam)
+- **Autoregressive prediction**: Each patch predicts the next patch's embedding
+
+### NEPA Architecture
+
+```
+Input ECG (B, 12, 5000)
+       │
+       ▼
+   PatchEmbedding (1D Conv)
+   (B, 12, 5000) → (B, 200, 384)
+       │
+       ▼
+   + Positional Embeddings (sinusoidal)
+       │
+       ▼
+   [Causal Transformer × 8]
+   ├─► Causal Attention (patch t sees only 0...t-1)
+   └─► MLP (384 → 1536 → 384)
+       │
+       ├─► z_in: Input embeddings (after patch+pos embed)
+       └─► z_out: Output embeddings (after transformer)
+       
+   Loss = -cosine_similarity(z_out[:-1], stop_grad(z_in[1:]))
+```
+
+### Key NEPA Concepts
+
+1. **Causal Attention**: Each patch can only attend to previous patches (upper triangular mask)
+2. **Stop-Gradient on Targets**: Prevents collapse by breaking gradient symmetry
+3. **Shifting for Prediction**: Output at position t predicts input at position t+1
+4. **Negative Cosine Similarity**: Loss approaches -1.0 when predictions are perfect
+
+### Implementation Details
+
+#### Files Created (nepa-ecg/)
+- `models/nepa_ecg.py` - Main NEPAForECG model
+- `models/modules.py` - PatchEmbedding, CausalAttention, CausalBlock, MLP, LayerScale, DropPath
+- `models/vit_classifier.py` - Classifier for finetuning
+- `data/datasets.py` - ECG dataset classes
+- `data/transforms.py` - TrainTransformECG, EvalTransformECG
+- `pretrain.py` - Pretraining with DDP and Wandb
+- `finetune.py` - PTB-XL evaluation
+- `configs/ViTS_mimic.yaml`, `ViTB_mimic.yaml`, `ViTL_mimic.yaml`
+- `batch/pretrain/small.sh`, `base.sh`, `large.sh`
+- `batch/finetune/rhythm.sh`, etc.
+
+#### Model Configurations
+
+| Config | dim | depth | heads | params |
+|--------|-----|-------|-------|--------|
+| ViT-S  | 384 | 8     | 6     | ~22M   |
+| ViT-B  | 768 | 12    | 12    | ~86M   |
+| ViT-L  | 1024| 24    | 16    | ~307M  |
+
+### Pretraining Results
+
+#### Training Dynamics
+- **Loss curve**: Started at ~0, went negative (good!), stabilized around -0.3 to -0.4
+- **Embeddings/std**: Stabilized around 0.14-0.15 (lower than expected)
+- **Embeddings/norm**: ~5.5
+- Trained for 200k steps on MIMIC-IV-ECG
+
+#### Loss Interpretation
+- NEPA uses negative cosine similarity
+- Loss of -0.3 means ~60% alignment between predictions and targets
+- More negative = better (perfect would be -1.0)
+
+### Finetuning Results
+
+#### Initial Results
+- **Rhythm classification AUC: 0.84** (vs ECG-JEPA's 0.96)
+- Significant gap of ~12% AUC
+
+#### Data Pipeline Issues Identified
+
+Compared our finetuning with ECG-JEPA's and found critical differences:
+
+1. **Normalization**: We used hardcoded mean/std, ECG-JEPA computes from train set
+2. **Clipping**: ECG-JEPA clips signals to [-5, 5], we didn't
+3. **Cropping**: ECG-JEPA uses random crops (train) and strided crops with averaging (eval)
+
+#### Fixes Applied
+
+```python
+# 1. Compute normalization from train data
+mean = np.mean(x[train_mask], axis=(0, 1), keepdims=True)
+std = np.std(x[train_mask], axis=(0, 1), keepdims=True)
+x = (x - mean) / (std + 1e-6)
+
+# 2. Clip to [-5, 5]
+x = np.clip(x, -5, 5)
+
+# 3. Random crop for training
+class TrainTransformECG:
+    def __call__(self, x):
+        start = random.randint(0, x.shape[-1] - crop_size)
+        return x[..., start:start + crop_size]
+
+# 4. Strided crops with averaging for eval
+class EvalTransformECG:
+    def __call__(self, x):
+        crops = []
+        for start in range(0, x.shape[-1] - crop_size + 1, stride):
+            crops.append(x[..., start:start + crop_size])
+        return torch.stack(crops)  # Average logits during inference
+```
+
+#### Results After Fixes
+- **Rhythm classification AUC: 0.88** (+4% improvement)
+- Still ~8% gap from ECG-JEPA's 0.96
+
+### Architectural Gaps Identified
+
+After detailed comparison with original NEPA and ECG-JEPA:
+
+| Component | Original NEPA | Our NEPA-ECG | ECG-JEPA |
+|-----------|---------------|--------------|----------|
+| CLS/Register Token | Yes (CLS) | No | Yes (registers) |
+| Position Embedding | RoPE | Sinusoidal | Sinusoidal |
+| QK Normalization | Yes | Yes | No |
+| LayerScale | Yes | Yes | No |
+| Bias in Linear | qkv_bias=True | True | False |
+| Warmup Steps | 10k | 5k | 10k |
+| Optimizer Betas | [0.9, 0.99] | [0.9, 0.999] | [0.9, 0.99] |
+
+### Why These Gaps Matter
+
+1. **CLS/Register Tokens**: Provide a global aggregation point; without them, we rely on mean pooling which may lose information
+
+2. **RoPE vs Sinusoidal**: RoPE encodes relative positions directly in attention, may generalize better to variable lengths
+
+3. **Warmup Steps**: Longer warmup (10k vs 5k) allows more stable initial training
+
+4. **Bias Settings**: Can affect optimization dynamics
+
+### Technical Issues Encountered
+
+1. **BFloat16 Error**: `TypeError: Got unsupported ScalarType BFloat16`
+   - Fix: Convert to float32 before numpy: `tensor.cpu().float().numpy()`
+
+2. **Pickle Error with weights_only=True**: PyTorch 2.6+ requires explicit `weights_only=False` for checkpoints with numpy scalars
+   - Fix: `torch.load(path, weights_only=False)`
+
+---
+
+## Phase 6: Plan - Rebuild on Original NEPA Codebase
+
+### Rationale
+Instead of building from scratch, adapt the original NEPA codebase (`nepa/`) to ECG. This ensures all NEPA components are preserved:
+- CLS token
+- RoPE (Rotary Position Embedding)
+- QK normalization
+- LayerScale
+- Proper initialization
+- HuggingFace Trainer integration
+
+### Planned Changes (Minimal)
+
+1. **Create `nepa/models/vit_nepa_ecg/`**
+   - `configuration_vit_nepa_ecg.py`: ECG-specific config (signal_length, num_channels=12)
+   - `modeling_vit_nepa_ecg.py`: 
+     - Conv1d patch embedding (instead of Conv2d)
+     - 1D RoPE (instead of 2D grid)
+
+2. **Create `nepa/run_nepa_ecg.py`**
+   - Load MIMIC-IV-ECG .npy files
+   - ECG transforms (normalize, clip, crop)
+   - Use HuggingFace Trainer (from original NEPA)
+
+3. **Create `nepa/run_ecg_classification.py`**
+   - PTB-XL finetuning
+   - Bidirectional attention for classification
+
+4. **Bash scripts**
+   - `nepa/scripts/pretrain/nepa_ecg_small.sh`
+   - `nepa/scripts/pretrain/nepa_ecg_base.sh`
+
+### Expected Outcome
+- All NEPA components preserved
+- Should close the gap to ECG-JEPA's 0.96 AUC
+- Cleaner codebase (leverages HuggingFace infrastructure)
+
+---
+
+## Updated Results Summary Table
+
+| Method | Architecture | AUC (Rhythm) | Notes |
+|--------|-------------|--------------|-------|
+| ECG-JEPA | 2 encoders + EMA | **0.96** | Baseline to beat |
+| LeJEPA-ECG | 1 encoder + augmentation + SIGReg | 0.59 | Augmentation-invariance failed |
+| MyJEPA v1 | 1 encoder + masking + SIGReg(proj) | 0.59 | Collapse despite SIGReg |
+| MyJEPA v2 | 1 encoder + masking + SIGReg(raw) + variance | TBD | Enhanced regularization |
+| NEPA-ECG v1 | Causal attention + stop-grad | 0.84 | Initial implementation |
+| NEPA-ECG v2 | + Fixed data pipeline | 0.88 | After normalization/cropping fixes |
+| NEPA-ECG v3 | Rebuild on original NEPA | TBD | Planned: add CLS, RoPE, etc. |
+
+---
+
+## Key Learnings from NEPA-ECG
+
+1. **Data pipeline is critical**: Proper normalization, clipping, and cropping account for ~4% AUC improvement
+
+2. **Architectural details matter**: Small differences (CLS token, RoPE, warmup) can account for remaining performance gap
+
+3. **Build on reference implementations**: Instead of reimplementing from scratch, adapt existing codebases to preserve all components
+
+4. **NEPA is simpler than JEPA**: No masking, no predictor, no EMA - just causal attention with stop-gradient
+
+5. **Negative cosine similarity loss**: More negative = better; -0.3 to -0.4 is reasonable, -1.0 would be perfect
+
+---
+
 *Log created: December 17, 2025*
-*Last updated: December 17, 2025*
+*Last updated: December 25, 2025*
 
