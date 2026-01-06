@@ -6,13 +6,19 @@ import pprint
 from contextlib import nullcontext
 from os import path, makedirs
 from time import time
+import io
 
 import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+from PIL import Image
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
+import wandb
 import configs
 from data import transforms, utils as datautils
 from data.datasets import PTB_XL
@@ -43,7 +49,118 @@ parser.add_argument('--amp', default='float32', choices=['bfloat16', 'float32'],
 parser.add_argument('--task', choices=TASKS, default='all', help='task type')
 parser.add_argument('--val-fold', choices=FOLDS, type=int, default=9, help='validation fold')
 parser.add_argument('--test-fold', choices=FOLDS, type=int, default=10, help='test fold')
+# WandB Arguments
+parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
+parser.add_argument('--wandb-project', default='Physio-JEPA-Finetune', help='wandb project name')
+parser.add_argument('--wandb-entity', default=None, help='wandb entity (team) name')
+parser.add_argument('--run-name', default=None, help='wandb run name')
 args = parser.parse_args()
+
+
+def visualize_embeddings(model, loader, step, device, title_suffix=""):
+    """
+    Extracts embeddings from the validation set (or a subset), 
+    runs PCA/t-SNE, and logs colored plots to WandB.
+    """
+    model.eval()
+    embeddings_list = []
+    labels_list = []
+    
+    # Collect a subset of data for visualization (e.g., up to 1024 samples)
+    max_samples = 1024
+    samples_count = 0
+    
+    with torch.no_grad():
+        for batch in loader:
+            x, y = (tensor.to(device) for tensor in batch)
+            
+            # Handle cropping if necessary (similar to validation loop)
+            # We assume the loader provided passed EvalTransformECG
+            if x.ndim == 4: # (Batch, Crops, Channels, Time)
+                 batch_size, num_crops, num_channels, channel_size = x.size()
+                 x = x.reshape(-1, num_channels, channel_size)
+            
+            # Extract features from the ENCODER directly
+            # encoder returns (Batch, Sequence, Dim)
+            features = model.encoder(x)
+            
+            # Global Average Pooling (Time dimension)
+            # Shape: (Batch, Dim)
+            features = features.mean(dim=1)
+            
+            # Aggregate crops if necessary
+            if 'num_crops' in locals():
+                features = features.reshape(batch_size, num_crops, -1).mean(dim=1)
+            
+            embeddings_list.append(features.cpu().numpy())
+            labels_list.append(y.cpu().numpy())
+            
+            samples_count += x.shape[0] if 'num_crops' not in locals() else batch_size
+            if samples_count >= max_samples:
+                break
+    
+    embeddings = np.concatenate(embeddings_list, axis=0)[:max_samples]
+    labels = np.concatenate(labels_list, axis=0)[:max_samples]
+    
+    model.train()
+
+    # Determine Colors based on Task Labels
+    # For multi-label, we pick the first active class (argmax) for visualization coloring
+    # Shape of labels: (N, Num_Classes)
+    color_indices = labels.argmax(axis=1)
+    num_classes = labels.shape[1]
+
+    # 1. PCA
+    pca = PCA(n_components=2)
+    pca_result = pca.fit_transform(embeddings)
+
+    # 2. t-SNE
+    n_samples = embeddings.shape[0]
+    perp = min(30, n_samples - 1)
+    if perp > 5:
+        tsne = TSNE(n_components=2, perplexity=perp, max_iter=1000, init='pca', learning_rate='auto')
+        tsne_result = tsne.fit_transform(embeddings)
+    else:
+        tsne_result = None
+
+    # 3. Plotting
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # Create a colormap
+    cmap = plt.get_cmap('tab10' if num_classes <= 10 else 'turbo', num_classes)
+    
+    # PCA Plot
+    scatter1 = ax1.scatter(pca_result[:, 0], pca_result[:, 1], 
+                           c=color_indices, cmap=cmap, alpha=0.7, s=20)
+    ax1.set_title(f"PCA {title_suffix}")
+    ax1.grid(True, alpha=0.3)
+    if num_classes <= 20: # Only show legend if not too cluttered
+        plt.colorbar(scatter1, ax=ax1, ticks=range(num_classes), label='Class Index')
+
+    # t-SNE Plot
+    if tsne_result is not None:
+        scatter2 = ax2.scatter(tsne_result[:, 0], tsne_result[:, 1], 
+                               c=color_indices, cmap=cmap, alpha=0.7, s=20)
+        ax2.set_title(f"t-SNE {title_suffix}")
+        ax2.grid(True, alpha=0.3)
+        if num_classes <= 20:
+             plt.colorbar(scatter2, ax=ax2, ticks=range(num_classes), label='Class Index')
+    else:
+        ax2.text(0.5, 0.5, "Not enough samples for t-SNE", ha='center')
+
+    plt.suptitle(f"Embedding Clusters @ Step {step}\nColored by Task Label (Argmax)")
+    plt.tight_layout()
+
+    # 4. Log to WandB
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    image = Image.open(buf)
+    
+    wandb.log({f"embeddings/{title_suffix}distribution": wandb.Image(image), "step": step})
+    
+    plt.close(fig)
+    buf.close()
 
 
 def main():
@@ -212,6 +329,19 @@ def main():
     batch_size=eval_config.batch_size,
     num_workers=2)
 
+  # WANDB INIT
+  if args.wandb:
+      wandb.init(
+          project=args.wandb_project,
+          entity=args.wandb_entity,
+          name=args.run_name,
+          config={
+              "encoder_config": dataclasses.asdict(encoder_config),
+              "eval_config": dataclasses.asdict(eval_config),
+              "task": args.task,
+          }
+      )
+
   # setup hyperparameter schedules
   lr_schedule = cosine_schedule(
     total_steps=eval_config.steps,
@@ -262,8 +392,15 @@ def main():
     step_end = time()
     step_time.update(step_end - step_start)
     train_loss.update(loss.item())
+    
     # evaluation
     if (step + 1) % eval_config.checkpoint_interval == 0:
+      # --- Visualization Start ---
+      if args.wandb:
+          # Visualize using Validation loader (or you can create a dedicated subset loader)
+          visualize_embeddings(model, val_loader, step + 1, device, title_suffix=f"({args.task})")
+      # --- Visualization End ---
+
       val_logits, val_targets = [], []
       model.eval()
       with torch.inference_mode():
@@ -294,11 +431,21 @@ def main():
         best_val_predictions = val_predictions
         best_step = step
         best_chkpt = copy.deepcopy(model.state_dict())
+      
       logger.info(f'[{step + 1:06d}] '
                   f'{"(*)" if new_best_val_auc else "   "} '
                   f'step_time {step_time.value:.4f} '
                   f'train_loss {train_loss.value:.4f} '
                   f'val_auc {val_auc:.4f}')
+
+      if args.wandb:
+          wandb.log({
+              "train/loss": train_loss.value,
+              "val/auc": val_auc,
+              "val/best_auc": best_val_auc,
+              "step": step + 1
+          })
+
       step_time = AverageMeter()
       train_loss = AverageMeter()
       if step - best_step >= eval_config.early_stopping_patience:
@@ -342,6 +489,10 @@ def main():
       y_score=test_predictions,
       average='macro')
   logger.info(f'test_auc {test_auc:.4f}')
+  
+  if args.wandb:
+      wandb.log({"test/auc": test_auc})
+
   np.savez(path.join(args.out, f'{args.task}_predictions.npz'),
            val_targets=val_targets, val_predictions=best_val_predictions,
            test_targets=test_targets, test_predictions=test_predictions)

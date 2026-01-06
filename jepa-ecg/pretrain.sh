@@ -6,12 +6,13 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 # Paths
 DATASET_PATH="../dataset/mimic-ecg.npy"
-OUTPUT_DIR="pretrain-output"
+OUTPUT_DIR="pretrain-output-st"
 CONFIG_NAME="ViTS_mimic"
 
 # WandB Settings (Replace with your actual team name)
 WANDB_ENTITY="AtlasVision_CC"
 WANDB_PROJECT="Physio-JEPA-ECG"
+WANDB_RUN="Physio-JEPA_ST"
 
 # 2. Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -27,6 +28,8 @@ nohup torchrun --nproc_per_node=2 pretrain.py \
   --wandb \
   --wandb-entity "${WANDB_ENTITY}" \
   --wandb-project "${WANDB_PROJECT}" \
+  --run-name "${WANDB_RUN}"\
+  --seed 42 \
   > "${OUTPUT_DIR}/training_dist.log" 2>&1 &
 
 # 4. Feedback

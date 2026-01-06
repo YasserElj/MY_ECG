@@ -6,8 +6,11 @@ from torch import nn
 
 import configs
 from models.predictor import Predictor
+from models.predictor_factorized import FactorizedPredictor
 from models.utils import apply_mask
+from models.utils_factorized import apply_mask_factorized
 from models.vision_transformer import VisionTransformer
+from models.vision_transformer_factorized import FactorizedViT
 
 
 class JEPA(nn.Module):
@@ -15,8 +18,17 @@ class JEPA(nn.Module):
     super().__init__()
     self.config = config
     self.momentum_schedule = momentum_schedule
-    self.encoder = VisionTransformer(config, use_sdp_kernel=use_sdp_kernel)
-    self.predictor = Predictor(config, use_sdp_kernel=use_sdp_kernel)
+    
+    # --- Architecture Selection ---
+    is_factorized = getattr(config, 'structure', 'standard') == 'factorized'
+    
+    if is_factorized:
+      self.encoder = FactorizedViT(config, keep_registers=False, use_sdp_kernel=use_sdp_kernel)
+      self.predictor = FactorizedPredictor(config, use_sdp_kernel=use_sdp_kernel)
+    else:
+      self.encoder = VisionTransformer(config, use_sdp_kernel=use_sdp_kernel)
+      self.predictor = Predictor(config, use_sdp_kernel=use_sdp_kernel)
+    
     self.target_encoder = copy.deepcopy(self.encoder)
 
     for param in self.target_encoder.parameters():
@@ -29,15 +41,26 @@ class JEPA(nn.Module):
       param_h.data = m * param_h.data + (1. - m) * param_z.data
 
   def forward(self, x, mask_encoder, mask_predictor):
+    is_factorized = getattr(self.config, 'structure', 'standard') == 'factorized'
+    
     with torch.no_grad():
       self.update_momentum_encoder()
       # compute prediction targets
       h = self.target_encoder(x)
-      h = apply_mask(h, mask_predictor)
+      
+      if is_factorized:
+        # Use Factorized helper to extract targets for all leads at masked time-steps
+        num_leads = len(self.config.channels)
+        h = apply_mask_factorized(h, mask_predictor, num_leads)
+      else:
+        h = apply_mask(h, mask_predictor)
+    
     # encode unmasked patches
     z = self.encoder(x, mask_encoder)
+    
     # predict masked patches
     z = self.predictor(z, mask_encoder, mask_predictor)
+    
     loss = torch.mean(torch.abs(z - h))
     return loss
 

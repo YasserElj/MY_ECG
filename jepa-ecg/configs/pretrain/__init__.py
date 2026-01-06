@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -42,6 +42,7 @@ class Config:
   gradient_clip: float
   gradient_accumulation_steps: int
   checkpoint_interval: int
+  structure: str = field(default='standard')  # 'standard' or 'factorized' - architecture type
 
   @property
   def num_channels(self):

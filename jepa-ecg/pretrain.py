@@ -59,6 +59,7 @@ parser.add_argument('--wandb', action='store_true', help='enable wandb logging')
 parser.add_argument('--wandb-project', default='Physio-JEPA-ECG', help='wandb project name')
 parser.add_argument('--wandb-entity', default=None, help='wandb entity (team) name')
 parser.add_argument('--run-name', default=None, help='wandb run name')
+parser.add_argument('--seed', default=42, type=int, help='random seed for reproducibility')
 args = parser.parse_args()
 
 # --- Dataset Statistics Updates ---
@@ -94,8 +95,7 @@ def setup_distributed():
 
 def seed_worker(worker_id):
     """
-    Seeds dataloader workers. 
-    Crucial for IterableDataset in DDP to ensure workers don't produce identical sequences.
+    Seeds dataloader workers based on the torch initial seed.
     """
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -128,13 +128,13 @@ def visualize_embeddings(model, batch_x, step, device):
     pca = PCA(n_components=2)
     pca_result = pca.fit_transform(embeddings)
 
-    # t-SNE
+    # t-SNE (Fixed argument name: n_iter -> max_iter)
     n_samples = embeddings.shape[0]
     perp = min(30, n_samples - 1)
     if perp < 5: 
-        return # Skip t-SNE if batch is too small
+        return 
         
-    tsne = TSNE(n_components=2, perplexity=perp, n_iter=1000, init='pca', learning_rate='auto')
+    tsne = TSNE(n_components=2, perplexity=perp, max_iter=1000, init='pca', learning_rate='auto')
     tsne_result = tsne.fit_transform(embeddings)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
@@ -155,7 +155,7 @@ def visualize_embeddings(model, batch_x, step, device):
     buf.seek(0)
     image = Image.open(buf)
     
-    wandb.log({"embeddings/distribution": wandb.Image(image), "step": step})
+    wandb.log({"embeddings/distribution": wandb.Image(image)}, step=step)
     
     plt.close(fig)
     buf.close()
@@ -184,22 +184,24 @@ def main():
     if rank == 0: logger.debug('TF32 tensor cores are enabled')
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    # For strict reproducibility, set benchmark to False, but it slows down training.
+    # We keep it True for performance, as seeding handles logic reproducibility.
     torch.backends.cudnn.benchmark = True
 
-  # Mixed Precision Setup
+  # Mixed Precision Setup (Updated to fix deprecation warning)
   if args.amp == 'float32' or not using_cuda:
     if rank == 0: logger.debug('using float32 precision')
     auto_mixed_precision = nullcontext()
   elif args.amp == 'bfloat16':
     if rank == 0: logger.debug('using bfloat16 with AMP')
-    auto_mixed_precision = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+    # Updated API
+    auto_mixed_precision = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
   else:
     raise ValueError('Failed to choose floating-point format.')
 
   # 2. Config Loading
   if args.chkpt:
     if rank == 0: logger.debug(f'resuming from checkpoint {args.chkpt}')
-    # Load to CPU first to avoid OOM on GPU 0
     chkpt = torch.load(args.chkpt, map_location='cpu') 
     config = configs.pretrain.Config(**chkpt['config'])
   else:
@@ -237,12 +239,9 @@ def main():
   datasets = {}
   for dataset_name, weight in config.datasets.items():
     if dataset_name not in dump_files:
-       continue # Or raise error
+       continue 
     dump_file = dump_files[dataset_name]
     
-    # Load Datasets (mapped or in memory)
-    # Note: We load the full dataset structure on all ranks. 
-    # Since we use mmap_mode='r' inside load_data_dump, this is memory efficient.
     if rank == 0: logger.debug(f'loading {dataset_name} from {dump_file}')
     
     dataset_cls = DATASETS[dataset_name]
@@ -252,7 +251,6 @@ def main():
     std = np.array([dataset_cls.std], dtype=np.float16)
     _, ext = path.splitext(dump_file)
 
-    # Prepare Transforms
     preprocess = PreprocessECG(
             mean_std=(mean, std),
             resample_ratio=resample_ratio,
@@ -280,15 +278,16 @@ def main():
   
   batch_size_per_gpu = config.batch_size // world_size
 
-  # Seed Global Generators uniquely per rank so DatasetRouter picks different data
-  # The seed is base_seed + rank.
-  base_seed = 42 # Or time()
-  torch.manual_seed(base_seed + rank)
-  np.random.seed(base_seed + rank)
+  # SEEDING: Ensure each rank has a unique but deterministic seed
+  # We add rank to the seed so GPUs process different data, but consistently.
+  global_seed = args.seed + rank
+  torch.manual_seed(global_seed)
+  np.random.seed(global_seed)
+  random.seed(global_seed)
 
   train_loader = DataLoader(
     dataset=DatasetRouter(datasets.values()),
-    batch_size=batch_size_per_gpu, # Local batch size
+    batch_size=batch_size_per_gpu, 
     pin_memory=using_cuda,
     collate_fn=MaskCollator(
       patch_size=config.patch_size,
@@ -296,7 +295,7 @@ def main():
       min_keep_ratio=config.min_keep_ratio,
       max_keep_ratio=config.max_keep_ratio),
     num_workers=2,
-    worker_init_fn=seed_worker # Seed workers based on rank+worker_id
+    worker_init_fn=seed_worker # This will use the torch seed set above
     )
 
   def map_to_device(data_iterator, device=None):
@@ -320,7 +319,6 @@ def main():
   else:
     step = 0
 
-  # Schedules
   momentum_schedule = linear_schedule(
     total_steps=config.steps,
     start_value=config.encoder_momentum,
@@ -339,33 +337,24 @@ def main():
     final_value=config.final_weight_decay,
     step=step)
 
-  # Initialize Model
   model = JEPA(
     config=config,
     momentum_schedule=momentum_schedule,
     use_sdp_kernel=using_cuda
   ).to(device)
 
-  original_model = model # Reference for saving state_dict (DDP modifies structure)
+  original_model = model 
 
-  # Load State
   if chkpt is not None:
     model.load_state_dict(chkpt['model'])
 
-  # Compile (Optional)
   if args.compile:
     model = torch.compile(model)
 
-  # Wrap DDP
   if is_distributed:
-    # JEPA has frozen target_encoder params; we assume find_unused_parameters=False is safe 
-    # as the forward pass uses all trainable params (encoder + predictor).
     model = DDP(model, device_ids=[rank], find_unused_parameters=False)
-    # For DDP, original_model (for saving) is model.module
     original_model = model.module
 
-  # Optimizer
-  # Note: get_optimizer should be called on the underlying model (original_model)
   optimizer = original_model.get_optimizer(fused=using_cuda)
   if chkpt is not None:
     optimizer.load_state_dict(chkpt['optimizer'])
@@ -394,9 +383,6 @@ def main():
       torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
     
     optimizer.step()
-    
-    # We only log average loss across all GPUs if needed, but usually logging local rank 0 loss is sufficient 
-    # to monitor convergence. For strict logging, use dist.all_reduce(loss).
     train_loss.update(batch_loss)
     
     optimizer.zero_grad(set_to_none=True)
@@ -405,6 +391,7 @@ def main():
 
     # 7. Visualization & Logging (Rank 0 only)
     if rank == 0:
+        # NOTE: Visualizations occur here.
         if (step + 1) % 1000 == 0 and args.wandb:
             visualize_embeddings(model, x, step + 1, device)
             
@@ -415,18 +402,16 @@ def main():
         
             if args.wandb:
                 wandb.log({
-                'train/loss': train_loss.value,
-                'train/step_time': step_time.value,
-                'train/lr': current_lr,
-                'train/weight_decay': current_wd,
-                'step': step + 1
-                })
+                    'train/loss': train_loss.value,
+                    'train/step_time': step_time.value,
+                    'train/lr': current_lr,
+                    'train/weight_decay': current_wd,
+                }, step=step + 1)
             
             step_time = AverageMeter()
             train_loss = AverageMeter()
             
         if (step + 1) % config.checkpoint_interval == 0:
-            # Save the underlying model (original_model)
             torch.save({
                 'model': original_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -438,11 +423,10 @@ def load_variable_data_dump(dump_file, min_channel_size, transform=None, process
   data = datautils.load_variable_data_dump(dump_file, transform=transform, processes=processes)
   data = [x for x in data if len(x) >= min_channel_size]
   sizes = np.array([len(x) for x in data])
-  starts = np.concatenate([np.array([0]), np.cumsum(sizes[:-1])])
+  # starts is not used in return, removing to avoid unused variable warning if strict
   data = np.concatenate(data)
   return data, sizes
 
-# ... (PreprocessECG and TransformECG classes remain the same) ...
 class PreprocessECG:  
   def __init__(self, *, mean_std, resample_ratio, channel_order):
     self.mean, self.std = mean_std
@@ -459,7 +443,6 @@ class PreprocessECG:
     x.clip(-5, 5, out=x)
     x = x[:, self.channel_order]
     return x
-
 
 class TransformECG: 
   def __init__(self, crop_size):
