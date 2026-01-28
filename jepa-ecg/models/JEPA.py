@@ -8,7 +8,7 @@ import configs
 from models.predictor import Predictor
 from models.predictor_factorized import FactorizedPredictor
 from models.utils import apply_mask
-from models.utils_factorized import apply_mask_factorized
+from models.utils_factorized import apply_mask_factorized, apply_mask_2d
 from models.vision_transformer import VisionTransformer
 from models.vision_transformer_factorized import FactorizedViT
 
@@ -43,20 +43,34 @@ class JEPA(nn.Module):
   def forward(self, x, mask_encoder, mask_predictor):
     is_factorized = getattr(self.config, 'structure', 'standard') == 'factorized'
     
+    # Detect if using 2D masking (tuple format with 3D indices tensor)
+    is_2d_mask = isinstance(mask_encoder, tuple) and mask_encoder[0].dim() == 3
+    
     with torch.no_grad():
       self.update_momentum_encoder()
-      # compute prediction targets
+      # compute prediction targets (EMA encoder sees full input)
       h = self.target_encoder(x)
       
-      if is_factorized:
-        # Use Factorized helper to extract targets for all leads at masked time-steps
+      if is_2d_mask:
+        # 2D masking: mask_predictor is (indices, lengths) tuple
+        mask_pred_indices, mask_pred_lengths = mask_predictor
+        num_leads = len(self.config.channels)
+        num_time = self.config.num_patches
+        h = apply_mask_2d(h, mask_pred_indices, num_leads, num_time)
+      elif is_factorized:
+        # 1D masking with factorized model: same time mask for all leads
         num_leads = len(self.config.channels)
         h = apply_mask_factorized(h, mask_predictor, num_leads)
       else:
+        # Standard 1D masking
         h = apply_mask(h, mask_predictor)
     
     # encode unmasked patches
-    z = self.encoder(x, mask_encoder)
+    if is_2d_mask:
+      mask_enc_indices, mask_enc_lengths = mask_encoder
+      z = self.encoder(x, mask_enc_indices)
+    else:
+      z = self.encoder(x, mask_encoder)
     
     # predict masked patches
     z = self.predictor(z, mask_encoder, mask_predictor)

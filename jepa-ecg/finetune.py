@@ -23,7 +23,7 @@ import configs
 from data import transforms, utils as datautils
 from data.datasets import PTB_XL
 from data.utils import TensorDataset
-from models import VisionTransformer, ViTClassifier
+from models import VisionTransformer, FactorizedViT, ViTClassifier
 from utils.monitoring import AverageMeter, get_memory_usage, get_cpu_count
 from utils.schedules import update_learning_rate_, cosine_schedule
 
@@ -350,10 +350,28 @@ def main():
     warmup_steps=eval_config.learning_rate_warmup_steps,
     warmup_start_value=1e-6)
 
+  # Detect if checkpoint is factorized (has 'structure' = 'factorized' in config)
+  is_factorized = encoder_config_dict.get('structure', None) == 'factorized'
+  
+  if is_factorized:
+    logger.debug('using FactorizedViT encoder (detected from checkpoint config)')
+    # Factorized model doesn't have register tokens
+    # If attn_pooling=False and use_register=True, switch to mean pooling
+    if not eval_config.attn_pooling and eval_config.use_register:
+      logger.warning('FactorizedViT does not support register tokens. '
+                     'Switching to mean pooling (use_register=False)')
+      eval_config = dataclasses.replace(eval_config, use_register=False)
+    encoder = FactorizedViT(
+      config=encoder_config,
+      keep_registers=False,  # Factorized model doesn't have registers
+      use_sdp_kernel=using_cuda)
+  else:
+    logger.debug('using standard VisionTransformer encoder')
   encoder = VisionTransformer(
     config=encoder_config,
     keep_registers=eval_config.use_register,
     use_sdp_kernel=using_cuda)
+  
   model = ViTClassifier(encoder, eval_config, use_sdp_kernel=using_cuda).to(device)
   optimizer = model.get_optimizer(fused=using_cuda)
 

@@ -93,48 +93,102 @@ class FactorizedViT(nn.Module):
             x: Input tensor of shape (B, L, S)
                B = batch size
                L = number of leads (typically 12)
-               S = signal length (typically 5000)
-            mask: Optional mask tensor of shape (B, K) with indices of patches to keep
+               S = signal length (can vary, e.g., 5000 for full or 1250 for cropped)
+            mask: Optional mask tensor:
+                  - Shape (B, K) for 1D masking: time indices to keep (same for all leads)
+                  - Shape (B, K, 2) for 2D masking: (lead_idx, time_idx) pairs to keep
                   If None, all patches are kept
         
         Returns:
             Output tensor of shape (B, N, D) where N is the number of kept patches
             (flattened from L × T structure)
         """
-        # Input x: (B, 12, 5000)
+        # Input x: (B, 12, S) where S can vary
         B, L, S = x.shape
         
         # --- Embedding ---
-        # Merge Batch and Lead: (B*L, 1, 5000)
+        # Merge Batch and Lead: (B*L, 1, S)
         x = x.reshape(B * L, 1, S)
-        x = self.patch_embed(x)  # -> (B*L, Dim, TimePatches)
-        x = x.transpose(1, 2)     # -> (B*L, TimePatches, Dim)
+        x = self.patch_embed(x)  # -> (B*L, Dim, T_actual)
+        x = x.transpose(1, 2)     # -> (B*L, T_actual, Dim)
         
-        # Reshape to (B, L, T, D)
-        # FIX: Use reshape() to safe-guard against non-contiguous memory from transpose
-        x = x.reshape(B, L, self.num_time_patches, -1)
+        # Compute actual number of time patches from the embedding output
+        T_actual = x.shape[1]
+        D = x.shape[2]
+        
+        # Reshape to (B, L, T_actual, D)
+        x = x.reshape(B, L, T_actual, D)
         
         # --- Add Positional Embeddings ---
-        # Time (broadcast across leads)
-        x = x + self.pos_embed_time.unsqueeze(1) 
+        # Time (broadcast across leads) - interpolate if input size differs
+        # pos_embed_time shape: (1, T_train, D)
+        pos_embed_time = self.pos_embed_time
+        if T_actual != self.num_time_patches:
+            # Interpolate positional embeddings to match actual input size
+            # (1, T, D) -> (1, D, T) for interpolate -> (1, D, T_actual) -> (1, T_actual, D)
+            pos_embed_time = pos_embed_time.permute(0, 2, 1)  # (1, D, T_train)
+            pos_embed_time = torch.nn.functional.interpolate(
+                pos_embed_time, size=T_actual, mode='linear', align_corners=False)
+            pos_embed_time = pos_embed_time.permute(0, 2, 1)  # (1, T_actual, D)
+        # pos_embed_time: (1, T, D) -> unsqueeze to (1, 1, T, D) for broadcasting with x: (B, L, T, D)
+        x = x + pos_embed_time.unsqueeze(1)
         # Space (broadcast across time)
         x = x + self.pos_embed_space
         
         # --- Masking ---
         if mask is not None:
-            # mask: (B, T_kept) -> (B, 1, T_kept, 1) -> expanded to (B, L, T_kept, D)
-            mask_indices = mask.reshape(B, 1, -1, 1).expand(-1, L, -1, x.size(-1))
-            # Gather the kept time steps
-            x = torch.gather(x, 2, mask_indices)
+            is_2d_mask = mask.dim() == 3  # (B, K, 2) for 2D masking
+            
+            if is_2d_mask:
+                # 2D masking: mask contains (lead_idx, time_idx) pairs
+                # Flatten x to (B, L*T, D) and gather specific positions
+                x_flat = x.flatten(1, 2)  # (B, L*T, D)
+                
+                # Convert 2D indices to flat indices: flat = lead * T + time
+                lead_indices = mask[:, :, 0]  # (B, K)
+                time_indices = mask[:, :, 1]  # (B, K)
+                flat_indices = lead_indices * T_actual + time_indices  # (B, K)
+                
+                # Expand for gathering
+                flat_indices = flat_indices.unsqueeze(-1).expand(-1, -1, D)  # (B, K, D)
+                x = torch.gather(x_flat, 1, flat_indices)  # (B, K, D)
+                
+                # For 2D masking, we can't use standard factorized blocks
+                # because we don't have a regular (L, T) grid anymore.
+                # We'll process as a flat sequence through the blocks.
+                # Reshape back to a pseudo-grid for block processing
+                # Since positions are irregular, we'll use (B, K, D) directly
+                # But factorized blocks expect (B, L, T, D), so we need to handle this.
+                # For now, skip factorized attention and use flat attention.
+                # This is a simplification - proper implementation would need
+                # sparse attention or different block structure.
+                
+                # Process as flat sequence through blocks
+                # Blocks expect (B, L, T, D), so we fake L=1, T=K
+                x = x.unsqueeze(1)  # (B, 1, K, D)
+                for block in self.blocks:
+                    x = block(x)
+                x = self.norm(x)
+                x = x.squeeze(1)  # (B, K, D)
+            else:
+                # 1D masking: mask is (B, T_kept), same mask for all leads
+                mask_indices = mask.reshape(B, 1, -1, 1).expand(-1, L, -1, x.size(-1))
+                x = torch.gather(x, 2, mask_indices)
+                
+                # --- Blocks ---
+                for block in self.blocks:
+                    x = block(x)
+                
+                x = self.norm(x)
+                # Flatten to (B, N_tokens, D)
+                x = x.flatten(1, 2)
+        else:
+            # No masking - process all tokens
+            for block in self.blocks:
+                x = block(x)
+            
+            x = self.norm(x)
+            x = x.flatten(1, 2)
         
-        # --- Blocks ---
-        for block in self.blocks:
-            x = block(x)
-        
-        x = self.norm(x)
-        
-        # Output: Flatten to (B, N_tokens, D) for the predictor
-        # Predictor expects standard sequence
-        x = x.flatten(1, 2) 
         return x
 

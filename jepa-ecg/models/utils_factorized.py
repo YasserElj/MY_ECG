@@ -44,3 +44,73 @@ def apply_mask_factorized(x, mask_indices, num_leads):
     return x_gathered.flatten(1, 2)
 
 
+def apply_mask_2d(x, mask_indices_2d, num_leads, num_time):
+    """
+    Apply 2D mask to factorized sequence using (lead, time) index pairs.
+    
+    This function gathers specific (lead, time) positions from the flattened
+    factorized sequence. Unlike apply_mask_factorized which applies the same
+    time mask to all leads, this allows different masks per lead.
+    
+    Args:
+        x: (B, L*T, D) - The flattened factorized sequence
+        mask_indices_2d: (B, K, 2) - Indices as (lead_idx, time_idx) pairs
+        num_leads: int (L) - Number of leads
+        num_time: int (T) - Number of time patches
+    
+    Returns:
+        x_masked: (B, K, D) - The gathered tokens at specified (lead, time) positions
+    """
+    B, total_tokens, D = x.size()
+    K = mask_indices_2d.size(1)
+    
+    # Convert 2D indices (lead, time) to flat indices
+    # Flat index = lead_idx * num_time + time_idx
+    lead_idx = mask_indices_2d[:, :, 0]  # (B, K)
+    time_idx = mask_indices_2d[:, :, 1]  # (B, K)
+    flat_indices = lead_idx * num_time + time_idx  # (B, K)
+    
+    # Expand for gathering: (B, K, D)
+    flat_indices_expanded = flat_indices.unsqueeze(-1).expand(-1, -1, D)
+    
+    # Gather tokens at specified positions
+    return torch.gather(x, 1, flat_indices_expanded)  # (B, K, D)
+
+
+def apply_mask_2d_with_lengths(x, mask_indices_2d, mask_lengths, num_leads, num_time):
+    """
+    Apply 2D mask with variable lengths per sample.
+    
+    When different samples have different numbers of masked positions,
+    the mask tensor is padded. This function handles the variable lengths.
+    
+    Args:
+        x: (B, L*T, D) - The flattened factorized sequence
+        mask_indices_2d: (B, K_max, 2) - Padded indices as (lead_idx, time_idx) pairs
+        mask_lengths: (B,) - Actual number of valid indices per sample
+        num_leads: int (L) - Number of leads
+        num_time: int (T) - Number of time patches
+    
+    Returns:
+        List of (K_i, D) tensors, one per sample (variable length)
+    """
+    B, total_tokens, D = x.size()
+    
+    results = []
+    for b in range(B):
+        K = mask_lengths[b].item()
+        indices = mask_indices_2d[b, :K]  # (K, 2)
+        lead_idx = indices[:, 0]  # (K,)
+        time_idx = indices[:, 1]  # (K,)
+        
+        # Convert to flat indices
+        flat_indices = lead_idx * num_time + time_idx  # (K,)
+        
+        # Gather: (K, D)
+        flat_indices_expanded = flat_indices.unsqueeze(-1).expand(-1, D)
+        gathered = torch.gather(x[b], 0, flat_indices_expanded)
+        results.append(gathered)
+    
+    return results
+
+

@@ -200,17 +200,29 @@ def main():
     raise ValueError('Failed to choose floating-point format.')
 
   # 2. Config Loading
+  # Resolve config file path
+  if not path.isfile(args.config):
+    config_file = path.join(path.dirname(configs.pretrain.__file__),  f'{args.config}.yaml')
+    if not path.isfile(config_file):
+      raise ValueError(f'Failed to read configuration file {args.config}')
+    args.config = config_file
+  
+  # Load config file
+  config_dict = configs.load_config_file(args.config)
+  
   if args.chkpt:
     if rank == 0: logger.debug(f'resuming from checkpoint {args.chkpt}')
     chkpt = torch.load(args.chkpt, map_location='cpu') 
+    # Start with checkpoint config
     config = configs.pretrain.Config(**chkpt['config'])
+    # Override batch_size and gradient_accumulation_steps from config file if present
+    if 'batch_size' in config_dict:
+      config.batch_size = config_dict['batch_size']
+      if rank == 0: logger.debug(f'overriding batch_size from config file: {config.batch_size}')
+    if 'gradient_accumulation_steps' in config_dict:
+      config.gradient_accumulation_steps = config_dict['gradient_accumulation_steps']
+      if rank == 0: logger.debug(f'overriding gradient_accumulation_steps from config file: {config.gradient_accumulation_steps}')
   else:
-    if not path.isfile(args.config):
-      config_file = path.join(path.dirname(configs.pretrain.__file__),  f'{args.config}.yaml')
-      if not path.isfile(config_file):
-        raise ValueError(f'Failed to read configuration file {args.config}')
-      args.config = config_file
-    config_dict = configs.load_config_file(args.config)
     config = configs.pretrain.Config(**config_dict)
     if rank == 0:
         logger.debug(f'loading configuration file from {args.config}:\n'
@@ -315,27 +327,27 @@ def main():
 
   # 6. Model Setup & DDP Wrapping
   if chkpt is not None:
-    step = chkpt['step']
+    start_step = chkpt['step']
   else:
-    step = 0
+    start_step = 0
 
   momentum_schedule = linear_schedule(
     total_steps=config.steps,
     start_value=config.encoder_momentum,
     final_value=config.final_encoder_momentum,
-    step=step)
+    step=start_step)
   lr_schedule = cosine_schedule(
     total_steps=config.steps,
     start_value=config.learning_rate,
     final_value=config.final_learning_rate,
     warmup_steps=config.learning_rate_warmup_steps,
     warmup_start_value=1e-6,
-    step=step)
+    step=start_step)
   wd_schedule = cosine_schedule(
     total_steps=config.steps,
     start_value=config.weight_decay,
     final_value=config.final_weight_decay,
-    step=step)
+    step=start_step)
 
   model = JEPA(
     config=config,
@@ -362,7 +374,7 @@ def main():
   step_time = AverageMeter()
   train_loss = AverageMeter()
 
-  for step in range(config.steps):
+  for step in range(start_step, config.steps):
     step_start = time()
     
     current_lr = next(lr_schedule)

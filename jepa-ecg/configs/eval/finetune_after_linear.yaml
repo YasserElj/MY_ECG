@@ -10,7 +10,7 @@ dropout: 0.1
 frozen: False
 # training
 steps: 5000
-batch_size: 128
+batch_size: 256
 learning_rate: 1.0e-4
 final_learning_rate: 1.0e-6
 learning_rate_warmup_steps: 200

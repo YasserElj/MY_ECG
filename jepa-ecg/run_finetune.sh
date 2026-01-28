@@ -1,23 +1,24 @@
 #!/bin/bash
 
 # 1. Configuration
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # --- USE ABSOLUTE PATHS TO PREVENT ERRORS ---
 # Run `pwd` in your terminal to find your current path and fill these in:
 DATA_DIR="../dataset/ptb-xl"  # <--- Verify this path contains scp_statements.csv
-PRETRAINED_CHKPT="pretrain-output-st/chkpt_35000.pt"
+PRETRAINED_CHKPT="pretrain-output-st/chkpt_100000.pt"
 
 
 # Settings
-TASK="rhythm"
+TASK="all"
+TASK_RUN_NAME="${TASK}_2"
 WANDB_ENTITY="AtlasVision_CC"
 WANDB_PROJECT="Physio-JEPA-Finetune"
 
 # Output Dirs
-OUT_LINEAR="ft-output-st/${TASK}/linear"
-OUT_FINETUNE="ft-output-st/${TASK}/finetune_standard"
-OUT_AFTER_LINEAR="ft-output-st/${TASK}/finetune_after_linear"
+OUT_LINEAR="ft-output-st/${TASK_RUN_NAME}/linear"
+OUT_FINETUNE="ft-output-st/${TASK_RUN_NAME}/finetune_standard"
+OUT_AFTER_LINEAR="ft-output-st/${TASK_RUN_NAME}/finetune_after_linear"
 
 # 2. Create directories
 mkdir -p "$OUT_LINEAR"
@@ -38,7 +39,7 @@ python -m finetune \
   --wandb \
   --wandb-entity \"${WANDB_ENTITY}\" \
   --wandb-project \"${WANDB_PROJECT}\" \
-  --run-name \"Linear-Probe-${TASK}\";
+  --run-name \"Linear-Probe-${TASK_RUN_NAME}\";
 
 # --- STEP 2: Standard Full Fine-Tuning ---
 # Unfreezes encoder immediately. Starts from PRE-TRAINED weights.
@@ -53,7 +54,7 @@ python -m finetune \
   --wandb \
   --wandb-entity \"${WANDB_ENTITY}\" \
   --wandb-project \"${WANDB_PROJECT}\" \
-  --run-name \"Finetune-Standard-${TASK}\";
+  --run-name \"Finetune-Standard-${TASK_RUN_NAME}\";
 
 # --- STEP 3: Fine-Tuning AFTER Linear (Optional) ---
 # Loads the BEST checkpoint from Step 1 and fine-tunes it with low LR.
@@ -70,15 +71,15 @@ if [ -f \"${OUT_LINEAR}/${TASK}_best_chkpt.pt\" ]; then
       --wandb \
       --wandb-entity \"${WANDB_ENTITY}\" \
       --wandb-project \"${WANDB_PROJECT}\" \
-      --run-name \"Finetune-After-Linear-${TASK}\";
+      --run-name \"Finetune-After-Linear-${TASK_RUN_NAME}\";
 else
     echo 'Skipping Step 3: Linear checkpoint not found.';
 fi
 "
 
 # 3. Launch
-nohup sh -c "$CMD" > "ft-output-st/${TASK}/finetune_phases_${TASK}.log" 2>&1 &
+nohup sh -c "$CMD" > "ft-output-st/${TASK_RUN_NAME}/finetune_phases_${TASK}.log" 2>&1 &
 
 echo "Phased training started."
-echo "Logs: output/${TASK}/finetune_phases_${TASK}.log"
+echo "Logs: ft-output-st/${TASK_RUN_NAME}/finetune_phases_${TASK}.log"
 echo "PID: $!"

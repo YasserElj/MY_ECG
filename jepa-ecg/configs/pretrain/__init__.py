@@ -43,7 +43,12 @@ class Config:
   gradient_accumulation_steps: int
   checkpoint_interval: int
   structure: str = field(default='standard')  # 'standard' or 'factorized' - architecture type
+  mask_type: str = field(default='1d')  # '1d', '2d_random', or '2d_lead_group' - masking strategy
 
   @property
   def num_channels(self):
     return len(self.channels)
+  
+  @property
+  def num_patches(self):
+    return self.channel_size // self.patch_size

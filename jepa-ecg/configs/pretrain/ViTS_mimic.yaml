@@ -26,7 +26,7 @@ norm_eps: 1.0e-6
 layer_scale_eps: 0.
 # training
 steps: 100_000
-batch_size: 256
+batch_size: 128
 encoder_momentum: 0.998
 final_encoder_momentum: 0.9995
 learning_rate: 1.0e-3
@@ -37,6 +37,7 @@ final_weight_decay: 1.0e-1
 opt_betas: [0.9, 0.99]
 opt_eps: 1.0e-6
 gradient_clip: 0
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 16
 checkpoint_interval: 5_000
 structure: 'factorized'
+mask_type: '1d'  # Options: '1d', '2d_random', '2d_lead_group'

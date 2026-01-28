@@ -13,7 +13,7 @@ from torch import nn
 import configs
 from models.modules_factorized import FactorizedBlock
 from models.utils import get_1d_pos_embed
-from models.utils_factorized import apply_mask_factorized
+from models.utils_factorized import apply_mask_factorized, apply_mask_2d
 
 
 class FactorizedPredictor(nn.Module):
@@ -88,60 +88,105 @@ class FactorizedPredictor(nn.Module):
         Forward pass through factorized predictor.
         
         Args:
-            x: (B, L*T_kept, D) - Encoder output (flattened)
-            mask_encoder: (B, T_kept) - Time indices seen by encoder
-            mask_predictor: (B, K) - Time indices to predict
+            x: (B, N_enc, D) - Encoder output (flattened)
+            mask_encoder: Either:
+                - (B, T_kept) for 1D masking: Time indices seen by encoder
+                - tuple ((B, K_enc, 2), lengths) for 2D masking: (lead, time) pairs
+            mask_predictor: Either:
+                - (B, K) for 1D masking: Time indices to predict
+                - tuple ((B, K_pred, 2), lengths) for 2D masking: (lead, time) pairs
         
         Returns:
-            z_pred: (B, L*K, D) - Predictions for all leads at masked time steps
+            z_pred: (B, N_pred, D) - Predictions for masked positions
         """
         B = x.shape[0]
-        K = mask_predictor.shape[1]
-        T_kept = mask_encoder.shape[1]
         
-        # 1. Prepare Positional Embeddings
-        # Combine Time + Space: (1, L, T, D)
-        # pos_embed_time: (1, T, D) -> (1, 1, T, D)
-        pos_embed = self.pos_embed_time.unsqueeze(1) + self.pos_embed_space
-        # Flatten to (1, L*T, D) for easier helper usage
-        pos_embed = pos_embed.flatten(1, 2).repeat(B, 1, 1)
-
-        # 2. Get Pos Embeds for Encoder (kept) and Predictor (masked) parts
-        # We use the helper to extract the correct Lead+Time positions
-        pos_encoder = apply_mask_factorized(pos_embed, mask_encoder, self.num_leads)
-        pos_predictor = apply_mask_factorized(pos_embed, mask_predictor, self.num_leads)
-
-        # 3. Embed Context (Encoder output)
-        x = self.embed(x)  # (B, L*T_kept, pred_dim)
-        x = x + pos_encoder
-
-        # 4. Prepare Mask Tokens (Targets)
-        # We need L*K mask tokens
-        mask_token = self.mask_token.repeat(B, self.num_leads * K, 1)
-        mask_token = mask_token + pos_predictor
-
-        # 5. Concatenate
-        # x: (B, L*(T_kept + K), pred_dim)
-        x = torch.cat([x, mask_token], dim=1)
-
-        # 6. Apply Blocks
-        # FactorizedBlock expects (B, L, T, D)
-        # We assume T_kept + K = T (Total Time)
-        total_time = T_kept + K
-        x = x.reshape(B, self.num_leads, total_time, -1)
+        # Detect if using 2D masking
+        is_2d_mask = isinstance(mask_encoder, tuple)
         
-        for block in self.blocks:
-            x = block(x)
+        if is_2d_mask:
+            # 2D masking: handle (lead, time) pairs
+            mask_enc_indices, mask_enc_lengths = mask_encoder
+            mask_pred_indices, mask_pred_lengths = mask_predictor
             
-        x = self.norm(x)
+            K_enc = mask_enc_indices.shape[1]  # Number of encoder positions
+            K_pred = mask_pred_indices.shape[1]  # Number of predictor positions
+            num_time = self.config.channel_size // self.config.patch_size
+            
+            # 1. Prepare 2D positional embeddings
+            # pos_embed_time: (1, T, D), pos_embed_space: (1, L, 1, D)
+            pos_embed = self.pos_embed_time.unsqueeze(1) + self.pos_embed_space  # (1, L, T, D)
+            pos_embed = pos_embed.flatten(1, 2).repeat(B, 1, 1)  # (B, L*T, D)
+            
+            # 2. Get positional embeddings for encoder and predictor positions
+            pos_encoder = apply_mask_2d(pos_embed, mask_enc_indices, self.num_leads, num_time)
+            pos_predictor = apply_mask_2d(pos_embed, mask_pred_indices, self.num_leads, num_time)
+            
+            # 3. Embed context
+            x = self.embed(x)  # (B, K_enc, pred_dim)
+            x = x + pos_encoder
+            
+            # 4. Prepare mask tokens
+            mask_token = self.mask_token.repeat(B, K_pred, 1)
+            mask_token = mask_token + pos_predictor
+            
+            # 5. Concatenate
+            x = torch.cat([x, mask_token], dim=1)  # (B, K_enc + K_pred, pred_dim)
+            
+            # 6. Apply blocks (as flat sequence since positions are irregular)
+            # Fake L=1 to use factorized blocks
+            total_tokens = K_enc + K_pred
+            x = x.unsqueeze(1)  # (B, 1, total_tokens, D)
+            
+            for block in self.blocks:
+                x = block(x)
+            
+            x = self.norm(x)
+            x = x.squeeze(1)  # (B, total_tokens, D)
+            
+            # 7. Extract predictions (last K_pred tokens)
+            z_pred = x[:, -K_pred:, :]
+            z_pred = self.proj(z_pred)
+            
+        else:
+            # 1D masking: same time mask for all leads
+            K = mask_predictor.shape[1]
+            T_kept = mask_encoder.shape[1]
+            
+            # 1. Prepare Positional Embeddings
+            pos_embed = self.pos_embed_time.unsqueeze(1) + self.pos_embed_space
+            pos_embed = pos_embed.flatten(1, 2).repeat(B, 1, 1)
+
+            # 2. Get Pos Embeds for Encoder (kept) and Predictor (masked) parts
+            pos_encoder = apply_mask_factorized(pos_embed, mask_encoder, self.num_leads)
+            pos_predictor = apply_mask_factorized(pos_embed, mask_predictor, self.num_leads)
+
+            # 3. Embed Context (Encoder output)
+            x = self.embed(x)  # (B, L*T_kept, pred_dim)
+            x = x + pos_encoder
+
+            # 4. Prepare Mask Tokens (Targets)
+            mask_token = self.mask_token.repeat(B, self.num_leads * K, 1)
+            mask_token = mask_token + pos_predictor
+
+            # 5. Concatenate
+            x = torch.cat([x, mask_token], dim=1)
+
+            # 6. Apply Blocks
+            total_time = T_kept + K
+            x = x.reshape(B, self.num_leads, total_time, -1)
+            
+            for block in self.blocks:
+                x = block(x)
+                
+            x = self.norm(x)
+            
+            # 7. Extract Predictions
+            x_flat = x.flatten(1, 2)
+            num_preds = self.num_leads * K
+            z_pred = x_flat[:, -num_preds:, :]
+            
+            z_pred = self.proj(z_pred)
         
-        # 7. Extract Predictions
-        # The mask tokens were appended at the end.
-        # We need the last L*K tokens.
-        x_flat = x.flatten(1, 2)
-        num_preds = self.num_leads * K
-        z_pred = x_flat[:, -num_preds:, :]
-        
-        z_pred = self.proj(z_pred)
         return z_pred
 
