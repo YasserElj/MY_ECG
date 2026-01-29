@@ -1,0 +1,55 @@
+# Grouped ViT with CoTAR - Small
+# CoTAR replaces attention with O(N) centralized communication
+# Combined with 2D masking for clinically meaningful prediction tasks
+#
+# Key differences from ViTS_grouped.yaml:
+#   - attention_type: 'cotar' (vs 'attention')
+#   - mask_type: '2d' (works well with CoTAR's global aggregation)
+
+# data
+sampling_frequency: 500
+channels: [I, II, III, AVR, AVL, AVF, V1, V2, V3, V4, V5, V6]
+channel_size: 5000
+patch_size: 25
+min_block_size: 10
+min_keep_ratio: 0.15
+max_keep_ratio: 0.25
+datasets:
+  mimic-iv-ecg: 1.
+
+# model architecture
+dim: 384
+depth: 8
+num_heads: 6          # Ignored by CoTAR but kept for compatibility
+pred_dim: 192
+pred_depth: 8
+pred_num_heads: 6     # Ignored by CoTAR but kept for compatibility
+mlp_ratio: 4.
+qkv_bias: False       # Ignored by CoTAR
+dropout: 0.
+attn_dropout: 0.      # Ignored by CoTAR
+num_registers: 0
+bias: False
+norm_eps: 1.0e-6
+layer_scale_eps: 0.
+
+# training
+steps: 100_000
+batch_size: 256
+encoder_momentum: 0.998
+final_encoder_momentum: 0.9995
+learning_rate: 1.0e-3
+final_learning_rate: 1.0e-6
+learning_rate_warmup_steps: 10_000
+weight_decay: 1.0e-2
+final_weight_decay: 1.0e-1
+opt_betas: [0.9, 0.99]
+opt_eps: 1.0e-6
+gradient_clip: 0
+gradient_accumulation_steps: 8
+checkpoint_interval: 5_000
+
+# Architecture type
+structure: 'grouped'
+attention_type: 'cotar'   # 'attention' or 'cotar'
+mask_type: '2d'           # 2D masking works well with CoTAR's global aggregation

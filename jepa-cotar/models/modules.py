@@ -43,6 +43,96 @@ class Block(nn.Module):
     return x
 
 
+class CoTAR(nn.Module):
+  """
+  Core Token Aggregation-Redistribution.
+  
+  Replaces O(N^2) attention with O(N) centralized communication.
+  Based on the TeCh paper: "Decentralized Attention Fails Centralized Signals"
+  
+  Instead of pairwise token interactions (attention), CoTAR:
+  1. Aggregates all tokens into a single "core token" (heart/brain state)
+  2. Redistributes this global context back to each token
+  
+  This matches the centralized nature of physiological signals where
+  a single source (heart/brain) drives all channels.
+  """
+  def __init__(self, dim, core_dim=None, dropout=0.):
+    super().__init__()
+    self.core_dim = core_dim or dim // 4
+    
+    # Aggregation pathway
+    self.lin1 = nn.Linear(dim, dim)
+    self.lin2 = nn.Linear(dim, self.core_dim)
+    
+    # Redistribution pathway
+    self.lin3 = nn.Linear(dim + self.core_dim, dim)
+    self.lin4 = nn.Linear(dim, dim)
+    
+    self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
+
+  def forward(self, x):
+    B, N, D = x.shape
+    
+    # === Aggregation: Create core token ===
+    # Project to latent space
+    core = F.gelu(self.lin1(x))  # (B, N, D)
+    core = self.lin2(core)       # (B, N, core_dim)
+    
+    # Compute attention weights across tokens
+    weight = F.softmax(core, dim=1)  # (B, N, core_dim)
+    
+    # Weighted sum to get global core token
+    core = torch.sum(core * weight, dim=1, keepdim=True)  # (B, 1, core_dim)
+    
+    # Expand core token to all positions
+    core = core.expand(-1, N, -1)  # (B, N, core_dim)
+    
+    # === Redistribution: Combine local + global ===
+    # Concatenate original tokens with core context
+    out = torch.cat([x, core], dim=-1)  # (B, N, D + core_dim)
+    
+    # Fuse information
+    out = F.gelu(self.lin3(out))  # (B, N, D)
+    out = self.lin4(out)          # (B, N, D)
+    
+    return self.dropout(out)
+
+
+class CoTARBlock(nn.Module):
+  """
+  Transformer block using CoTAR instead of attention.
+  
+  Same structure as Block but with CoTAR replacing multi-head attention.
+  """
+  def __init__(
+      self,
+      dim,
+      mlp_ratio=4.,
+      bias=True,
+      dropout=0.,
+      eps=1e-6,
+      layer_scale_eps=0.,
+  ):
+    super().__init__()
+    self.norm1 = nn.LayerNorm(dim, eps=eps, bias=bias)
+    self.cotar = CoTAR(dim, core_dim=dim // 4, dropout=dropout)
+    self.cotar_ls = LayerScale(dim, eps=layer_scale_eps) if layer_scale_eps else nn.Identity()
+    self.norm2 = nn.LayerNorm(dim, eps=eps, bias=bias)
+    mlp_hidden_dim = int(dim * mlp_ratio)
+    self.mlp = MLP(
+      in_features=dim,
+      hidden_features=mlp_hidden_dim,
+      dropout=dropout,
+      bias=bias)
+    self.mlp_ls = LayerScale(dim, eps=layer_scale_eps) if layer_scale_eps else nn.Identity()
+
+  def forward(self, x):
+    x = x + self.cotar_ls(self.cotar(self.norm1(x)))
+    x = x + self.mlp_ls(self.mlp(self.norm2(x)))
+    return x
+
+
 class CrossAttentionBlock(nn.Module):
   def __init__(
       self,

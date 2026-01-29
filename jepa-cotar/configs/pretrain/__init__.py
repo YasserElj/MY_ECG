@@ -44,6 +44,7 @@ class Config:
   checkpoint_interval: int
   structure: str = field(default='standard')  # 'standard', 'factorized', or 'grouped' - architecture type
   mask_type: str = field(default='1d')  # '1d', '2d_random', or '2d_lead_group' - masking strategy
+  attention_type: str = field(default='attention')  # 'attention' or 'cotar' - token interaction mechanism
 
   @property
   def num_channels(self):
