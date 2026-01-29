@@ -597,7 +597,19 @@ def main():
     use_sdp_kernel=using_cuda
   ).to(device)
 
-  original_model = model 
+  original_model = model
+  
+  # Verify CoTAR is being used (if configured)
+  if rank == 0:
+    attention_type = getattr(config, 'attention_type', 'attention')
+    encoder_blocks = model.encoder.blocks
+    block_type = type(encoder_blocks[0]).__name__
+    logger.debug(f'Encoder using {block_type} blocks (attention_type={attention_type})')
+    
+    if attention_type == 'cotar' and 'CoTAR' not in block_type:
+      logger.warning(f'WARNING: attention_type=cotar but blocks are {block_type}!')
+    elif attention_type == 'cotar':
+      logger.info(f'✓ CoTAR verified: encoder has {len(encoder_blocks)} CoTARBlock layers') 
 
   if chkpt is not None:
     model.load_state_dict(chkpt['model'])
