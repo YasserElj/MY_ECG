@@ -161,6 +161,182 @@ def visualize_embeddings(model, batch_x, step, device):
     buf.close()
 
 
+def visualize_2d_masking(x_batch, mask_encoder, mask_predictor, config, num_samples=5):
+    """
+    Visualize 2D masking patterns on ECG data and log to W&B.
+    
+    Shows which (group, time) positions are:
+    - Kept (visible to encoder) - GREEN
+    - Masked (to predict) - RED
+    
+    Args:
+        x_batch: (B, 12, signal_length) - raw ECG data
+        mask_encoder: tuple/list of (indices, lengths) for kept patches
+        mask_predictor: tuple/list of (indices, lengths) for masked patches
+        config: configuration object
+        num_samples: number of samples to visualize
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.patches import Rectangle
+    
+    # Handle tuple/list format
+    if isinstance(mask_encoder, (tuple, list)):
+        enc_indices, enc_lengths = mask_encoder
+    else:
+        enc_indices = mask_encoder
+        enc_lengths = None
+    
+    if isinstance(mask_predictor, (tuple, list)):
+        pred_indices, pred_lengths = mask_predictor
+    else:
+        pred_indices = mask_predictor
+        pred_lengths = None
+    
+    # Move to CPU for visualization
+    enc_indices = enc_indices.cpu().numpy()
+    pred_indices = pred_indices.cpu().numpy()
+    x_batch = x_batch.cpu().numpy()
+    
+    num_groups = 4
+    num_time = config.num_patches  # 200
+    patch_size = config.patch_size  # 25 samples per patch
+    signal_length = config.channel_size  # 5000
+    
+    # Lead group labels and indices
+    group_labels = ['Limb (I,II,III)', 'Aug (aVR,aVL,aVF)', 'Septal (V1,V2)', 'Lateral (V3-V6)']
+    group_leads = [[0, 1, 2], [3, 4, 5], [6, 7], [8, 9, 10, 11]]  # Lead indices per group
+    
+    # Create figure with 3 columns: Raw ECG, Mask Grid, ECG with Overlay
+    fig, axes = plt.subplots(num_samples, 3, figsize=(28, 4 * num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    for i in range(min(num_samples, x_batch.shape[0])):
+        # Build mask grid for this sample
+        mask_grid = np.ones((num_groups, num_time)) * 0.5  # Default: grey
+        
+        # Get valid indices for this sample
+        if enc_lengths is not None:
+            n_enc = int(enc_lengths[i].item()) if hasattr(enc_lengths[i], 'item') else int(enc_lengths[i])
+        else:
+            n_enc = enc_indices.shape[1]
+        
+        if pred_lengths is not None:
+            n_pred = int(pred_lengths[i].item()) if hasattr(pred_lengths[i], 'item') else int(pred_lengths[i])
+        else:
+            n_pred = pred_indices.shape[1]
+        
+        # Mark kept positions (encoder) - value 1 (green)
+        for j in range(n_enc):
+            g, t = enc_indices[i, j]
+            if g < num_groups and t < num_time:
+                mask_grid[g, t] = 1.0
+        
+        # Mark masked positions (predictor) - value 0 (red)
+        for j in range(n_pred):
+            g, t = pred_indices[i, j]
+            if g < num_groups and t < num_time:
+                mask_grid[g, t] = 0.0
+        
+        # === Column 1: Raw ECG signals ===
+        ax_ecg = axes[i, 0]
+        for lead_idx in range(12):
+            ax_ecg.plot(x_batch[i, lead_idx] + lead_idx * 2, 
+                       linewidth=0.5, alpha=0.7)
+        ax_ecg.set_title(f'Sample {i+1}: Raw 12-Lead ECG')
+        ax_ecg.set_xlabel('Time (samples)')
+        ax_ecg.set_ylabel('Lead')
+        ax_ecg.set_yticks(range(0, 24, 2))
+        ax_ecg.set_yticklabels(['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 
+                                'V1', 'V2', 'V3', 'V4', 'V5', 'V6'])
+        
+        # === Column 2: 2D Masking grid ===
+        ax_mask = axes[i, 1]
+        colors = ['#ff4444', '#cccccc', '#44bb44']  # red, grey, green
+        cmap = LinearSegmentedColormap.from_list('mask_cmap', colors, N=256)
+        
+        im = ax_mask.imshow(mask_grid, aspect='auto', cmap=cmap, vmin=0, vmax=1)
+        ax_mask.set_title(f'Sample {i+1}: 2D Masking Pattern')
+        ax_mask.set_xlabel(f'Time Patches (0-{num_time-1})')
+        ax_mask.set_ylabel('Lead Groups')
+        ax_mask.set_yticks(range(num_groups))
+        ax_mask.set_yticklabels(group_labels)
+        
+        # Add statistics
+        kept_pct = n_enc / (num_groups * num_time) * 100
+        masked_pct = n_pred / (num_groups * num_time) * 100
+        ax_mask.text(0.02, 0.98, f'Kept: {n_enc} ({kept_pct:.1f}%)\nMasked: {n_pred} ({masked_pct:.1f}%)',
+                    transform=ax_mask.transAxes, fontsize=9, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # === Column 3: ECG with Mask Overlay ===
+        ax_overlay = axes[i, 2]
+        
+        # Plot ECG signals grouped by lead group with vertical offset
+        group_offset = 0
+        group_spacing = 6  # Vertical space between groups
+        
+        for g_idx, (g_name, leads) in enumerate(zip(group_labels, group_leads)):
+            for l_offset, lead_idx in enumerate(leads):
+                y_offset = group_offset + l_offset * 1.5
+                ax_overlay.plot(x_batch[i, lead_idx] + y_offset, 
+                               linewidth=0.5, alpha=0.8, color='black')
+            
+            # Add masked/kept overlay rectangles for this group
+            for t in range(num_time):
+                x_start = t * patch_size
+                x_end = (t + 1) * patch_size
+                y_bottom = group_offset - 0.5
+                y_top = group_offset + len(leads) * 1.5 - 0.5
+                
+                if mask_grid[g_idx, t] == 0.0:  # Masked (red)
+                    rect = Rectangle((x_start, y_bottom), patch_size, y_top - y_bottom,
+                                    facecolor='red', alpha=0.3, edgecolor='none')
+                    ax_overlay.add_patch(rect)
+                elif mask_grid[g_idx, t] == 1.0:  # Kept (green)
+                    rect = Rectangle((x_start, y_bottom), patch_size, y_top - y_bottom,
+                                    facecolor='green', alpha=0.15, edgecolor='none')
+                    ax_overlay.add_patch(rect)
+            
+            group_offset += len(leads) * 1.5 + group_spacing
+        
+        ax_overlay.set_title(f'Sample {i+1}: ECG with Mask Overlay')
+        ax_overlay.set_xlabel('Time (samples)')
+        ax_overlay.set_ylabel('Lead Groups')
+        ax_overlay.set_xlim(0, signal_length)
+        
+        # Add group labels on y-axis
+        group_centers = []
+        offset = 0
+        for leads in group_leads:
+            group_centers.append(offset + len(leads) * 1.5 / 2 - 0.5)
+            offset += len(leads) * 1.5 + group_spacing
+        ax_overlay.set_yticks(group_centers)
+        ax_overlay.set_yticklabels(group_labels)
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor='green', alpha=0.3, label='Kept (encoder sees)'),
+                          Patch(facecolor='red', alpha=0.5, label='Masked (to predict)')]
+        ax_overlay.legend(handles=legend_elements, loc='upper right', fontsize=8)
+    
+    plt.suptitle('2D Masking Visualization: GroupedViT + CoTAR', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    # Log to W&B
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    image = Image.open(buf)
+    
+    wandb.log({"masking/2d_pattern": wandb.Image(image)}, step=0)
+    
+    plt.close(fig)
+    buf.close()
+    
+    logging.info("Logged 2D masking visualization to W&B")
+
+
 def main():
   # 1. Setup Distributed Environment
   device, rank, world_size, is_distributed = setup_distributed()
@@ -367,9 +543,18 @@ def main():
     worker_init_fn=seed_worker # This will use the torch seed set above
     )
 
+  def to_device(x, device):
+    """Recursively move tensors to device, handling nested tuples/lists."""
+    if isinstance(x, torch.Tensor):
+      return x.to(device, non_blocking=using_cuda)
+    elif isinstance(x, (tuple, list)):
+      return type(x)(to_device(item, device) for item in x)
+    else:
+      return x
+
   def map_to_device(data_iterator, device=None):
     for batch in data_iterator:
-      yield tuple(x.to(device, non_blocking=using_cuda) for x in batch)
+      yield tuple(to_device(x, device) for x in batch)
 
   def prefetch_batch(data_iterator):
     prefetched_batch = next(data_iterator)
@@ -430,6 +615,9 @@ def main():
 
   step_time = AverageMeter()
   train_loss = AverageMeter()
+  
+  # Flag for one-time visualization
+  visualized_masking = False
 
   for step in range(start_step, config.steps):
     step_start = time()
@@ -442,6 +630,14 @@ def main():
     batch_loss = 0.
     for _ in range(config.gradient_accumulation_steps):
       x, mask_encoder, mask_predictor = next(train_iterator)
+      
+      # One-time visualization of 2D masking at the start
+      if not visualized_masking and rank == 0 and getattr(config, 'mask_type', '1d') == '2d':
+        try:
+          visualize_2d_masking(x, mask_encoder, mask_predictor, config, num_samples=5)
+          visualized_masking = True
+        except Exception as e:
+          logging.warning(f"Failed to visualize 2D masking: {e}")
       with auto_mixed_precision:
         loss = model(x, mask_encoder, mask_predictor)
         loss = loss / config.gradient_accumulation_steps

@@ -114,14 +114,16 @@ class GroupedPredictor(nn.Module):
     B = x.shape[0]
     
     # Check if 1D or 2D masking
-    is_2d_mask = isinstance(mask_predictor, tuple) or (mask_predictor.dim() == 3)
+    # Note: DataLoader multiprocessing can convert tuples to lists
+    is_2d_mask = isinstance(mask_predictor, (tuple, list)) or (mask_predictor.dim() == 3)
     
     if is_2d_mask:
-      # 2D masking: mask_predictor is (indices, lengths) tuple or (B, K, 2)
-      if isinstance(mask_predictor, tuple):
+      # 2D masking: mask_predictor is (indices, lengths) tuple/list or (B, K, 2) tensor
+      if isinstance(mask_predictor, (tuple, list)):
         mask_pred_indices, mask_pred_lengths = mask_predictor
         mask_enc_indices, mask_enc_lengths = mask_encoder
       else:
+        # Direct tensor (B, K, 2)
         mask_pred_indices = mask_predictor
         mask_enc_indices = mask_encoder
       

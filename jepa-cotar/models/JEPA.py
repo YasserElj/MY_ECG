@@ -50,8 +50,13 @@ class JEPA(nn.Module):
     is_factorized = structure == 'factorized'
     is_grouped = structure == 'grouped'
     
-    # Detect if using 2D masking (tuple format with 3D indices tensor)
-    is_2d_mask = isinstance(mask_encoder, tuple) and mask_encoder[0].dim() == 3
+    # Detect if using 2D masking (tuple/list format with 3D indices tensor)
+    # Note: DataLoader multiprocessing can convert tuples to lists during pickling
+    is_2d_mask = (
+        isinstance(mask_encoder, (tuple, list)) and 
+        len(mask_encoder) == 2 and 
+        mask_encoder[0].dim() == 3
+    )
     
     with torch.no_grad():
       self.update_momentum_encoder()

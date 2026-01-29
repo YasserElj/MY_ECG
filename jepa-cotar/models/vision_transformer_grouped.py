@@ -13,6 +13,7 @@ from torch import nn
 import configs
 from models.modules import GroupedPatchEmbedding, Block, CoTARBlock
 from models.utils import apply_mask
+from models.utils_factorized import apply_mask_2d
 
 
 def get_2d_pos_embed(dim, num_groups, num_patches):
@@ -169,7 +170,15 @@ class GroupedViT(nn.Module):
     
     # Apply masking if provided
     if mask is not None:
-      x = apply_mask(x, mask)
+      # Detect 2D mask (B, K, 2) vs 1D mask (B, K)
+      if mask.dim() == 3 and mask.size(-1) == 2:
+        # 2D mask: (group_idx, time_idx) pairs
+        num_groups = 4
+        num_time = self.config.num_patches
+        x = apply_mask_2d(x, mask, num_groups, num_time)
+      else:
+        # 1D mask: time indices only
+        x = apply_mask(x, mask)
     
     # Add register tokens
     if self.config.num_registers > 0:
