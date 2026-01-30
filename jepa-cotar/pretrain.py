@@ -469,6 +469,9 @@ def main():
   # SEEDING: Ensure each rank has a unique but deterministic seed
   # We add rank to the seed so GPUs process different data, but consistently.
   global_seed = args.seed + rank
+  #this so that if i resume pretraining i don't end up using the same data and same masking.
+  if chkpt is not None:
+    global_seed = global_seed + chkpt['step']
   torch.manual_seed(global_seed)
   np.random.seed(global_seed)
   random.seed(global_seed)

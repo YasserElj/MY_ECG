@@ -29,7 +29,7 @@ nohup torchrun --nproc_per_node=1 pretrain.py \
   --wandb-entity "${WANDB_ENTITY}" \
   --wandb-project "${WANDB_PROJECT}" \
   --run-name "${WANDB_RUN}"\
-  --seed 42 \
+  --seed 2001 \
   > "${OUTPUT_DIR}/pretraining.log" 2>&1 &
 
 # 4. Feedback
