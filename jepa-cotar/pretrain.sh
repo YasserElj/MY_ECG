@@ -25,6 +25,7 @@ nohup torchrun --nproc_per_node=1 pretrain.py \
   --out "${OUTPUT_DIR}" \
   --config "${CONFIG_NAME}" \
   --amp "bfloat16" \
+  --chkpt "pretrain-output-cotar/chkpt_65000.pt" \
   --wandb \
   --wandb-entity "${WANDB_ENTITY}" \
   --wandb-project "${WANDB_PROJECT}" \

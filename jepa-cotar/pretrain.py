@@ -391,13 +391,12 @@ def main():
     chkpt = torch.load(args.chkpt, map_location='cpu') 
     # Start with checkpoint config
     config = configs.pretrain.Config(**chkpt['config'])
-    # Override batch_size and gradient_accumulation_steps from config file if present
-    if 'batch_size' in config_dict:
-      config.batch_size = config_dict['batch_size']
-      if rank == 0: logger.debug(f'overriding batch_size from config file: {config.batch_size}')
-    if 'gradient_accumulation_steps' in config_dict:
-      config.gradient_accumulation_steps = config_dict['gradient_accumulation_steps']
-      if rank == 0: logger.debug(f'overriding gradient_accumulation_steps from config file: {config.gradient_accumulation_steps}')
+    # Override these from config file on resume
+    overridable = ('batch_size', 'gradient_accumulation_steps', 'steps', 'checkpoint_interval')
+    for key in overridable:
+      if key in config_dict:
+        setattr(config, key, config_dict[key])
+        if rank == 0: logger.debug(f'overriding {key} from config file: {config_dict[key]}')
   else:
     config = configs.pretrain.Config(**config_dict)
     if rank == 0:
